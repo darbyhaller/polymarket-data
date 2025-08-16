@@ -84,8 +84,8 @@ def format_size(size):
     else:
         return f"{size:.2f}"
 
-def print_schema():
-    """Print the schema header"""
+def update_pst_reference_and_print_schema():
+    """Update PST reference time and print schema header"""
     global current_pst_reference, reference_timestamp_ms
     
     current_pst_reference = datetime.now(pst_tz)
@@ -93,27 +93,67 @@ def print_schema():
     
     print(f'Current PST: {current_pst_reference.strftime("%Y-%m-%d %H:%M:%S PST")}')
     print()
-    print('price (tenths of cents) | size | side | outcome | time since last timestamp | market')
+    print('price | size | side | outcome | ms since last TS | market')
     print('-' * 100)
+
+def print_schema():
+    """Print the initial schema header"""
+    update_pst_reference_and_print_schema()
+
+def get_outcome_from_price(price_k):
+    """Determine outcome based on price"""
+    return "Yes/Up" if price_k > 500 else "No/Down"
+
+def calculate_ms_since_reference(current_timestamp_ms):
+    """Calculate milliseconds since PST reference time"""
+    return current_timestamp_ms - reference_timestamp_ms if reference_timestamp_ms else 0
 
 def print_trade_line(price_k, size_str, side, outcome, ms_ago, market):
     """Print a formatted trade line"""
     global line_count
     
-    print(f'{price_k:>5} | {size_str:>8} | {side:>4} | {outcome:<8} | {ms_ago:>7}ms | {market}')
+    print(f'{price_k:>5} | {size_str:>8} | {side:>4} | {outcome:<8} | {ms_ago:>4} | {market}')
     line_count += 1
     
     # Show schema every 50 lines
     if line_count % 50 == 0:
-        global current_pst_reference, reference_timestamp_ms
         print('-' * 100)
-        # Update the PST reference time
-        current_pst_reference = datetime.now(pst_tz)
-        reference_timestamp_ms = int(current_pst_reference.timestamp() * 1000)
-        print(f'Current PST: {current_pst_reference.strftime("%Y-%m-%d %H:%M:%S PST")}')
-        print()
-        print('price (tenths of cents) | size | side | outcome | time since last timestamp | market')
-        print('-' * 100)
+        update_pst_reference_and_print_schema()
+
+def process_event_data(data, current_timestamp_ms):
+    """Process individual event data and print trade line if applicable"""
+    event_type = data.get('event_type', 'unknown')
+    asset_id = data.get('asset_id', 'unknown')
+    
+    # Get market title
+    market = asset_to_market.get(asset_id, f"Asset {asset_id[:8]}...")
+    market = market[:80] + "..." if len(market) > 80 else market
+    
+    ms_ago = calculate_ms_since_reference(current_timestamp_ms)
+    
+    if event_type == 'last_trade_price':
+        # Real trade execution
+        price_k = int(float(data.get('price', 0)) * 1000)
+        size_str = format_size(float(data.get('size', 0)))
+        side = data.get('side', 'N/A')
+        outcome = get_outcome_from_price(price_k)
+        
+        print_trade_line(price_k, size_str, side, outcome, ms_ago, market)
+        
+    elif event_type == 'price_change':
+        # Order book updates (only show significant changes)
+        changes = data.get('changes', [])
+        for change in changes:
+            size = float(change.get('size', 0))
+            
+            # Only show non-zero size changes (actual new orders)
+            if size > 0:
+                price_k = int(float(change.get('price', 0)) * 1000)
+                size_str = format_size(size)
+                side = change.get('side', 'N/A')
+                outcome = get_outcome_from_price(price_k)
+                
+                print_trade_line(price_k, size_str, side, outcome, ms_ago, market)
 
 def on_message(ws, msg):
     try:
@@ -123,59 +163,7 @@ def on_message(ws, msg):
             events = [events]
             
         for data in events:
-            event_type = data.get('event_type', 'unknown')
-            asset_id = data.get('asset_id', 'unknown')
-            
-            # Get market title
-            market = asset_to_market.get(asset_id, f"Asset {asset_id[:8]}...")
-            market = market[:45] + "..." if len(market) > 45 else market
-            
-            if event_type == 'last_trade_price':
-                # Real trade execution
-                price_k = int(float(data.get('price', 0)) * 1000)
-                size = float(data.get('size', 0))
-                size_str = format_size(size)
-                side = data.get('side', 'N/A')
-                
-                # Calculate milliseconds since PST reference time
-                if reference_timestamp_ms:
-                    ms_ago = current_timestamp_ms - reference_timestamp_ms
-                else:
-                    ms_ago = 0
-                
-                # Determine outcome (for trades, we don't have outcome info, so use price-based logic)
-                if price_k > 500:
-                    outcome = "Yes/Up"
-                else:
-                    outcome = "No/Down"
-                
-                print_trade_line(price_k, size_str, side, outcome, ms_ago, market)
-                
-            elif event_type == 'price_change':
-                # Order book updates (only show significant changes)
-                changes = data.get('changes', [])
-                for change in changes:
-                    size = float(change.get('size', 0))
-                    
-                    # Only show non-zero size changes (actual new orders)
-                    if size > 0:
-                        price_k = int(float(change.get('price', 0)) * 1000)
-                        size_str = format_size(size)
-                        side = change.get('side', 'N/A')
-                        
-                        # Calculate milliseconds since PST reference time
-                        if reference_timestamp_ms:
-                            ms_ago = current_timestamp_ms - reference_timestamp_ms
-                        else:
-                            ms_ago = 0
-                        
-                        # Determine outcome based on price
-                        if price_k > 500:
-                            outcome = "Yes/Up"
-                        else:
-                            outcome = "No/Down"
-                        
-                        print_trade_line(price_k, size_str, side, outcome, ms_ago, market)
+            process_event_data(data, current_timestamp_ms)
             
     except Exception as e:
         print(f"Error processing message: {e}")
