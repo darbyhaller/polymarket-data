@@ -1,0 +1,42 @@
+# Polymarket Trading Bot Configuration
+api:
+  base_url: "https://clob.polymarket.com"
+  websocket_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  rate_limit: 10  # requests per second
+
+trading:
+  default_market: "trump-president-2024"  # Example market
+  position_size: 10.0  # USDC
+  max_inventory: 100.0  # USDC
+  stop_loss: -50.0  # USDC
+  take_profit: 100.0  # USDC
+  
+features:
+  lookback_window: 100  # number of ticks for features
+  update_frequency: 5  # seconds between model updates
+  feature_columns:
+    - "mid_price"
+    - "spread"
+    - "depth_imbalance"
+    - "signed_volume"
+    - "order_flow_imbalance"
+    - "recent_return"
+    - "volatility"
+
+model:
+  type: "logistic_regression"
+  prediction_horizon: 30  # seconds
+  retrain_frequency: 300  # seconds
+  max_features: 10
+  regularization: 0.01
+
+evaluation:
+  backtest_days: 7
+  transaction_cost: 0.001  # 0.1% per trade
+  slippage_model: "linear"  # linear, sqrt, or fixed
+  min_spread: 0.01  # minimum spread to trade
+
+logging:
+  level: "INFO"
+  file: "polymarket_bot.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
