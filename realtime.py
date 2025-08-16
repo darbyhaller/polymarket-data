@@ -93,7 +93,7 @@ def print_schema():
     
     print(f'Current PST: {current_pst_reference.strftime("%Y-%m-%d %H:%M:%S PST")}')
     print()
-    print('price | size | side | outcome | timestamp | market')
+    print('price (tenths of cents) | size | side | outcome | time since last timestamp | market')
     print('-' * 100)
 
 def print_trade_line(price_k, size_str, side, outcome, ms_ago, market):
@@ -112,7 +112,7 @@ def print_trade_line(price_k, size_str, side, outcome, ms_ago, market):
         reference_timestamp_ms = int(current_pst_reference.timestamp() * 1000)
         print(f'Current PST: {current_pst_reference.strftime("%Y-%m-%d %H:%M:%S PST")}')
         print()
-        print('price | size | side | outcome | timestamp | market')
+        print('price (tenths of cents) | size | side | outcome | time since last timestamp | market')
         print('-' * 100)
 
 def on_message(ws, msg):
