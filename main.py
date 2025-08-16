@@ -5,13 +5,19 @@ Gets live trading data from official Polymarket endpoints
 """
 
 import requests
-import json
 from datetime import datetime
+import pytz
 
 def get_live_trades():
     """Get and display live Polymarket trading data"""
     print('=== GETTING LIVE POLYMARKET TRADING DATA ===')
-    print(f'Unix Timestamp: {int(datetime.now().timestamp())}')
+    
+    # Get current time in EST
+    est_tz = pytz.timezone('US/Eastern')
+    current_time_est = datetime.now(est_tz)
+    current_timestamp_ms = int(current_time_est.timestamp() * 1000)
+    
+    print(f'Current EST: {current_time_est.strftime("%Y-%m-%d %H:%M:%S EST")}')
     print()
 
     # Get recent trades
@@ -22,28 +28,35 @@ def get_live_trades():
     print()
     
     # Show schema at the top
-    print('market | price | size | side | outcome')
-    print('-' * 60)
+    print('price | size | side | outcome | timestamp | market')
+    print('-' * 100)
     
-    for i, trade in enumerate(trades):
+    for i, trade in enumerate(reversed(trades)):
         # Convert price to thousands of dollars (multiply by 1000)
         price_k = int(trade["price"] * 1000)
         
-        # Format the data row
-        market = trade["title"][:30] + "..." if len(trade["title"]) > 100 else trade["title"]
-        print(f'{market} | {price_k} | {trade["size"]} | {trade["side"]} | {trade["outcome"]}')
+        # Calculate milliseconds ago
+        trade_timestamp_ms = int(trade["timestamp"] * 1000)
+        ms_ago = current_timestamp_ms - trade_timestamp_ms
         
-        # Show schema every 100 trades
-        if (i + 1) % 100 == 0:
-            print('-' * 60)
-            print('market | price | size | side | outcome')
-            print('-' * 60)
+        # Format size to 3 significant figures
+        size = float(trade["size"])
+        if size >= 100:
+            size_str = f"{size:.0f}"
+        elif size >= 10:
+            size_str = f"{size:.1f}"
+        else:
+            size_str = f"{size:.2f}"
+        
+        # Format the data row with fixed widths (price | size | side | outcome | timestamp | market)
+        market = trade["title"]
+        print(f'{price_k:>5} | {size_str:>8} | {trade["side"]:>4} | {trade["outcome"]:<12} | {ms_ago:>8}ms | {market}')
     
     # Show schema at the bottom
-    print('-' * 60)
-    print('market | price | size | side | outcome')
+    print('-' * 100)
+    print('price | size | side | outcome | timestamp | market')
     print()
-    print(f'Raw timestamps from API: {trades[0]["timestamp"] if trades else "N/A"}')
+    print(f'Current EST: {current_time_est.strftime("%Y-%m-%d %H:%M:%S EST")}')
 
 if __name__ == "__main__":
     get_live_trades()
