@@ -192,7 +192,7 @@ def main():
     print("=== Polymarket Recently Traded Markets Fetcher ===\n")
     
     # Fetch comprehensive market data from recent trades
-    markets = fetch_all_markets_from_trades(limit=1000)
+    markets = fetch_all_markets_from_trades(limit=10000)
     
     # Extract all unique token IDs
     all_token_ids = []

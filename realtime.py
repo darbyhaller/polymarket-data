@@ -38,41 +38,38 @@ pst_tz = pytz.timezone('US/Pacific')
 current_pst_reference = None
 reference_timestamp_ms = None
 
-# Asset ID to market title mapping
+# Asset ID to market title mapping and outcome mapping
 asset_to_market = {}
+asset_outcome = {}
 
-def get_market_titles():
-    """Get market titles for asset IDs from recent trades and our markets JSON"""
+def get_market_titles_and_outcomes():
+    """Get market titles and outcome labels for asset IDs from recent trades"""
     try:
-        # First try to load from our markets.json
-        with open('markets.json', 'r') as f:
-            data = json.load(f)
-            markets = data.get('markets', [])
-            
-            for market in markets:
-                question = market.get('question', '')[:45]  # Truncate for display
-                for token_id in market.get('token_ids', []):
-                    asset_to_market[token_id] = question
-        
-        print(f"Loaded market titles for {len(asset_to_market)} tokens from markets.json")
-        
-        # Fill in any missing titles from recent trades
-        response = requests.get('https://data-api.polymarket.com/trades?limit=500')
+        # Get titles and outcome labels from recent trades API
+        response = requests.get('https://data-api.polymarket.com/trades?limit=100000')
         trades = response.json()
         
-        new_titles = 0
+        titles_added = 0
+        outcomes_added = 0
+        
         for trade in trades:
             asset_id = trade.get('asset')
-            if asset_id in ASSET_IDS and asset_id not in asset_to_market:
-                title = trade.get('title', '')[:45]
-                asset_to_market[asset_id] = title
-                new_titles += 1
+            if asset_id in ASSET_IDS:
+                # Add title if missing
+                if asset_id not in asset_to_market and trade.get('title'):
+                    title = trade['title'][:45]
+                    asset_to_market[asset_id] = title
+                    titles_added += 1
                 
-        if new_titles > 0:
-            print(f"Added {new_titles} additional market titles from trades API")
+                # Add outcome label if missing
+                if asset_id not in asset_outcome and trade.get('outcome'):
+                    asset_outcome[asset_id] = trade['outcome'].title()
+                    outcomes_added += 1
+        
+        print(f"Loaded {titles_added} market titles and {outcomes_added} outcome labels from trades API")
                 
     except Exception as e:
-        print(f"Warning: Could not fetch market titles: {e}")
+        print(f"Warning: Could not fetch market titles/outcomes: {e}")
 
 def format_size(size):
     """Format size to 3 significant figures"""
@@ -100,9 +97,9 @@ def print_schema():
     """Print the initial schema header"""
     update_pst_reference_and_print_schema()
 
-def get_outcome_from_price(price_k):
-    """Determine outcome based on price"""
-    return "Yes/Up" if price_k > 500 else "No/Down"
+def get_outcome_label(asset_id):
+    """Get outcome label for asset ID"""
+    return asset_outcome.get(asset_id, "Unknown")
 
 def calculate_ms_since_reference(current_timestamp_ms):
     """Calculate milliseconds since PST reference time"""
@@ -136,7 +133,7 @@ def process_event_data(data, current_timestamp_ms):
         price_k = int(float(data.get('price', 0)) * 1000)
         size_str = format_size(float(data.get('size', 0)))
         side = data.get('side', 'N/A')
-        outcome = get_outcome_from_price(price_k)
+        outcome = get_outcome_label(asset_id)
         
         print_trade_line(price_k, size_str, side, outcome, ms_ago, market)
         
@@ -151,7 +148,7 @@ def process_event_data(data, current_timestamp_ms):
                 price_k = int(float(change.get('price', 0)) * 1000)
                 size_str = format_size(size)
                 side = change.get('side', 'N/A')
-                outcome = get_outcome_from_price(price_k)
+                outcome = get_outcome_label(asset_id)
                 
                 print_trade_line(price_k, size_str, side, outcome, ms_ago, market)
 
@@ -173,7 +170,7 @@ def on_error(ws, error):
 
 if __name__ == "__main__":
     print("Loading market data...")
-    get_market_titles()
+    get_market_titles_and_outcomes()
     
     print('=== POLYMARKET REAL-TIME TRADING FEED ===')
     print_schema()
