@@ -11,13 +11,26 @@ import pytz
 from websocket import WebSocketApp
 import requests
 
-# WebSocket URL and recent active asset IDs
+# WebSocket URL
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-ASSET_IDS = [
-    "41973459713215151999702185043345326004708146007379332707173419489400288130968",  # Bitcoin Up/Down
-    "37886561608087953818265292905354954599362226068882661611845483805874017292923",  # Everton
-    "44617211960566611274104228135196329399423806182011291547349968906058936209209"   # Panthers vs Texans
-]
+
+def load_token_ids():
+    """Load token IDs from the generated JSON file"""
+    try:
+        with open('token_ids.json', 'r') as f:
+            data = json.load(f)
+            token_ids = data.get('token_ids', [])
+            print(f"Loaded {len(token_ids)} token IDs from token_ids.json")
+            return token_ids
+    except FileNotFoundError:
+        print("Error: token_ids.json not found. Run get_markets.py first!")
+        return []
+    except Exception as e:
+        print(f"Error loading token IDs: {e}")
+        return []
+
+# Load all token IDs from the markets we fetched
+ASSET_IDS = load_token_ids()
 
 # Global counters and state
 line_count = 0
@@ -29,14 +42,34 @@ reference_timestamp_ms = None
 asset_to_market = {}
 
 def get_market_titles():
-    """Get market titles for asset IDs"""
+    """Get market titles for asset IDs from recent trades and our markets JSON"""
     try:
-        response = requests.get('https://data-api.polymarket.com/trades?limit=50')
+        # First try to load from our markets.json
+        with open('markets.json', 'r') as f:
+            data = json.load(f)
+            markets = data.get('markets', [])
+            
+            for market in markets:
+                question = market.get('question', '')[:45]  # Truncate for display
+                for token_id in market.get('token_ids', []):
+                    asset_to_market[token_id] = question
+        
+        print(f"Loaded market titles for {len(asset_to_market)} tokens from markets.json")
+        
+        # Fill in any missing titles from recent trades
+        response = requests.get('https://data-api.polymarket.com/trades?limit=500')
         trades = response.json()
         
+        new_titles = 0
         for trade in trades:
-            if trade['asset'] in ASSET_IDS:
-                asset_to_market[trade['asset']] = trade['title']
+            asset_id = trade.get('asset')
+            if asset_id in ASSET_IDS and asset_id not in asset_to_market:
+                title = trade.get('title', '')[:45]
+                asset_to_market[asset_id] = title
+                new_titles += 1
+                
+        if new_titles > 0:
+            print(f"Added {new_titles} additional market titles from trades API")
                 
     except Exception as e:
         print(f"Warning: Could not fetch market titles: {e}")
@@ -158,11 +191,18 @@ if __name__ == "__main__":
     print_schema()
     
     def on_open_handler(ws):
+        if not ASSET_IDS:
+            print("No asset IDs loaded. Exiting...")
+            return
+            
+        print(f"Subscribing to {len(ASSET_IDS)} token IDs...")
         subscribe_msg = {
             "assets_ids": ASSET_IDS,
-            "type": "market"
+            "type": "market",
+            "initial_dump": False  # Disable initial order book dump to avoid flood
         }
         ws.send(json.dumps(subscribe_msg))
+        print("Subscription message sent successfully!")
     
     ws = WebSocketApp(
         WS_URL,
