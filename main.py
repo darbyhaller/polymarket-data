@@ -21,7 +21,7 @@ def get_live_trades():
     print()
 
     # Get recent trades
-    response = requests.get('https://data-api.polymarket.com/trades?limit=200')
+    response = requests.get('https://data-api.polymarket.com/trades?limit=1000')
     trades = response.json()
 
     print(f'Found {len(trades)} recent trades:')
