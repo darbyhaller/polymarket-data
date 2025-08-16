@@ -14,23 +14,8 @@ import requests
 # WebSocket URL
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
-def load_token_ids():
-    """Load token IDs from the generated JSON file"""
-    try:
-        with open('token_ids.json', 'r') as f:
-            data = json.load(f)
-            token_ids = data.get('token_ids', [])
-            print(f"Loaded {len(token_ids)} token IDs from token_ids.json")
-            return token_ids
-    except FileNotFoundError:
-        print("Error: token_ids.json not found. Run get_markets.py first!")
-        return []
-    except Exception as e:
-        print(f"Error loading token IDs: {e}")
-        return []
-
-# Load all token IDs from the markets we fetched
-ASSET_IDS = load_token_ids()
+# Global variables
+ASSET_IDS = []
 
 # Global counters and state
 line_count = 0
@@ -42,34 +27,75 @@ reference_timestamp_ms = None
 asset_to_market = {}
 asset_outcome = {}
 
-def get_market_titles_and_outcomes():
-    """Get market titles and outcome labels for asset IDs from recent trades"""
+def fetch_markets_and_populate_data():
+    """
+    Fetch recently active markets from trades API and populate token IDs, titles, and outcomes.
+    Adapted from get_markets.py logic.
+    """
+    global ASSET_IDS
+    
     try:
-        # Get titles and outcome labels from recent trades API
-        response = requests.get('https://data-api.polymarket.com/trades?limit=100000')
+        print("Fetching recent trades to find active markets and token IDs...")
+        
+        # Get comprehensive trades data
+        response = requests.get('https://data-api.polymarket.com/trades?limit=10000', timeout=20)
+        response.raise_for_status()
         trades = response.json()
         
-        titles_added = 0
-        outcomes_added = 0
+        print(f"Retrieved {len(trades)} recent trades")
+        
+        # Group trades by condition_id to find unique markets
+        markets_by_condition = {}
         
         for trade in trades:
-            asset_id = trade.get('asset')
-            if asset_id in ASSET_IDS:
-                # Add title if missing
-                if asset_id not in asset_to_market and trade.get('title'):
-                    title = trade['title'][:45]
-                    asset_to_market[asset_id] = title
-                    titles_added += 1
+            condition_id = trade.get("conditionId")
+            if not condition_id:
+                continue
                 
-                # Add outcome label if missing
-                if asset_id not in asset_outcome and trade.get('outcome'):
-                    asset_outcome[asset_id] = trade['outcome'].title()
-                    outcomes_added += 1
+            if condition_id not in markets_by_condition:
+                markets_by_condition[condition_id] = {
+                    "condition_id": condition_id,
+                    "question": trade.get("title", ""),
+                    "token_ids": set(),
+                    "outcomes": set(),
+                    "trade_count": 0
+                }
+            
+            market = markets_by_condition[condition_id]
+            
+            # Add token_id and outcome
+            asset_id = trade.get("asset")
+            if asset_id:
+                market["token_ids"].add(asset_id)
+                
+                # Populate our mappings
+                if trade.get("title"):
+                    asset_to_market[asset_id] = trade["title"][:45]
+                
+                if trade.get("outcome"):
+                    asset_outcome[asset_id] = trade["outcome"].title()
+            
+            if trade.get("outcome"):
+                market["outcomes"].add(trade.get("outcome"))
+            
+            market["trade_count"] += 1
         
-        print(f"Loaded {titles_added} market titles and {outcomes_added} outcome labels from trades API")
-                
+        # Extract all unique token IDs
+        all_token_ids = []
+        for market in markets_by_condition.values():
+            all_token_ids.extend(list(market["token_ids"]))
+        
+        # Remove duplicates while preserving order
+        ASSET_IDS = list(dict.fromkeys(all_token_ids))
+        
+        print(f"Found {len(markets_by_condition)} unique markets")
+        print(f"Extracted {len(ASSET_IDS)} unique token IDs")
+        print(f"Populated {len(asset_to_market)} market titles")
+        print(f"Populated {len(asset_outcome)} outcome labels")
+        
     except Exception as e:
-        print(f"Warning: Could not fetch market titles/outcomes: {e}")
+        print(f"Error fetching markets and token data: {e}")
+        ASSET_IDS = []
 
 def format_size(size):
     """Format size to 3 significant figures"""
@@ -170,7 +196,7 @@ def on_error(ws, error):
 
 if __name__ == "__main__":
     print("Loading market data...")
-    get_market_titles_and_outcomes()
+    fetch_markets_and_populate_data()
     
     print('=== POLYMARKET REAL-TIME TRADING FEED ===')
     print_schema()
