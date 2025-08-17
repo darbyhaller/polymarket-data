@@ -20,9 +20,16 @@ CAPTURE_SECONDS = 5  # adjust as needed
 asset_to_market = {}
 asset_outcome = {}
 
+# Track first asset_id seen for each market to avoid duplicates
+market_to_first_asset = {}
+allowed_asset_ids = set()
+
+# Track seen hashes to avoid duplicate events
+seen_hashes = set()
+
 def fetch_markets_and_populate_data():
     """Fetch recent trades and collect distinct asset (token) IDs."""
-    global ASSET_IDS
+    global ASSET_IDS, market_to_first_asset, allowed_asset_ids
     try:
         print("Fetching recent trades to find active assets...")
         resp = requests.get("https://data-api.polymarket.com/trades?limit=100000", timeout=20)
@@ -33,18 +40,30 @@ def fetch_markets_and_populate_data():
         seen = set()
         for t in trades:
             aid = t.get("asset")
+            market_title = t.get("title", "").strip()
+            
             if aid and aid not in seen:
                 seen.add(aid)
                 
+                # Track first asset_id per market to avoid duplicates
+                if market_title and market_title not in market_to_first_asset:
+                    market_to_first_asset[market_title] = aid
+                    allowed_asset_ids.add(aid)
+                    print(f"Market '{market_title[:50]}...' -> first asset_id: {aid}")
+                elif market_title and market_to_first_asset.get(market_title) == aid:
+                    # This asset_id is the first one for this market
+                    allowed_asset_ids.add(aid)
+                
                 # Populate our mappings while we're iterating
-                if t.get("title"):
-                    asset_to_market[aid] = t["title"][:80]
+                if market_title:
+                    asset_to_market[aid] = market_title[:80]
                 
                 if t.get("outcome"):
                     asset_outcome[aid] = t["outcome"].title()
 
         ASSET_IDS = list(seen)
-        print(f"Using {len(ASSET_IDS)} asset IDs for data capture")
+        print(f"Found {len(ASSET_IDS)} total asset IDs")
+        print(f"Allowing {len(allowed_asset_ids)} asset IDs (first per market)")
         print(f"Populated {len(asset_to_market)} market titles")
         print(f"Populated {len(asset_outcome)} outcome labels")
     except Exception as e:
@@ -65,6 +84,18 @@ def on_message(ws, msg):
         for data in events:
             et = data.get("event_type", "unknown")
             asset_id = data.get("asset_id", "unknown")
+            
+            # Skip events for asset_ids that are not the first seen for their market
+            if asset_id not in allowed_asset_ids:
+                continue
+            
+            # Skip events with duplicate hashes
+            event_hash = data.get("hash")
+            if event_hash:
+                if event_hash in seen_hashes:
+                    continue
+                seen_hashes.add(event_hash)
+                
             base = {
                 "ts_ms": now_ms,
                 "event_type": et,
@@ -88,9 +119,6 @@ def on_message(ws, msg):
 
             elif et == "price_change":
                 # Per-price deltas (new aggregate size at price level)
-                # Remove market_title and outcome to save space since they can be reconstructed from book events
-                del base["market_title"]
-                del base["outcome"]
                 base.update({
                     "changes": data.get("changes", []),   # [{price, side, size}, ...]
                     "timestamp": data.get("timestamp"),
