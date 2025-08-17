@@ -21,7 +21,7 @@ def fetch_markets_and_populate_data():
     global ASSET_IDS
     try:
         print("Fetching recent trades to find active assets...")
-        resp = requests.get("https://data-api.polymarket.com/trades?limit=10000", timeout=20)
+        resp = requests.get("https://data-api.polymarket.com/trades?limit=100000", timeout=20)
         resp.raise_for_status()
         trades = resp.json()
         print(f"Retrieved {len(trades)} recent trades")
