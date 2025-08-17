@@ -153,8 +153,6 @@ def print_trade_line(price_k, size_str, side, outcome, ms_ago, market):
         is_duplicate = (
             # Same market
             current_trade['market'] == last_trade['market'] and
-            # Same timestamp
-            current_trade['ms_ago'] == last_trade['ms_ago'] and
             # Same size
             current_trade['size_str'] == last_trade['size_str'] and
             # Opposite sides
