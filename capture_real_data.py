@@ -6,15 +6,17 @@ Capture Polymarket L2 order book (book snapshots + price-level deltas) as NDJSON
 import json
 import time
 import requests
+import threading
+from threading import Lock
 from websocket import WebSocketApp
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 OUTFILE = "orderbook_clip.jsonl"
 
 ASSET_IDS = []
-captured_events = []
 start_time = None
 CAPTURE_SECONDS = 60  # adjust as needed
+TRADES_UPDATE_INTERVAL = 30  # seconds between trades API calls
 
 # Asset ID to market title mapping and outcome mapping
 asset_to_market = {}
@@ -27,51 +29,90 @@ allowed_asset_ids = set()
 # Track seen hashes to avoid duplicate events
 seen_hashes = set()
 
-def fetch_markets_and_populate_data():
+# Thread safety locks
+data_lock = Lock()
+file_lock = Lock()
+
+# File handle for live writing
+outfile_handle = None
+
+def fetch_markets_and_populate_data(initial_load=True):
     """Fetch recent trades and collect distinct asset (token) IDs."""
     global ASSET_IDS, market_to_first_asset, allowed_asset_ids
     try:
-        print("Fetching recent trades to find active assets...")
+        if initial_load:
+            print("Fetching recent trades to find active assets...")
         resp = requests.get("https://data-api.polymarket.com/trades?limit=100000", timeout=20)
         resp.raise_for_status()
         trades = resp.json()
-        print(f"Retrieved {len(trades)} recent trades")
+        if initial_load:
+            print(f"Retrieved {len(trades)} recent trades")
 
         seen = set()
-        for t in trades:
-            aid = t.get("asset")
-            market_title = t.get("title", "").strip()
-            
-            if aid and aid not in seen:
-                seen.add(aid)
+        new_assets = 0
+        
+        with data_lock:
+            for t in trades:
+                aid = t.get("asset")
+                market_title = t.get("title", "").strip()
                 
-                # Track first asset_id per market to avoid duplicates
-                if market_title and market_title not in market_to_first_asset:
-                    market_to_first_asset[market_title] = aid
-                    allowed_asset_ids.add(aid)
-                    print(f"Market '{market_title[:50]}...' -> first asset_id: {aid}")
-                elif market_title and market_to_first_asset.get(market_title) == aid:
-                    # This asset_id is the first one for this market
-                    allowed_asset_ids.add(aid)
-                
-                # Populate our mappings while we're iterating
-                if market_title:
-                    asset_to_market[aid] = market_title[:80]
-                
-                if t.get("outcome"):
-                    asset_outcome[aid] = t["outcome"].title()
+                if aid and aid not in seen:
+                    seen.add(aid)
+                    
+                    # Track first asset_id per market to avoid duplicates
+                    if market_title and market_title not in market_to_first_asset:
+                        market_to_first_asset[market_title] = aid
+                        allowed_asset_ids.add(aid)
+                        new_assets += 1
+                        if initial_load:
+                            print(f"Market '{market_title[:50]}...' -> first asset_id: {aid}")
+                    elif market_title and market_to_first_asset.get(market_title) == aid:
+                        # This asset_id is the first one for this market
+                        if aid not in allowed_asset_ids:
+                            allowed_asset_ids.add(aid)
+                            new_assets += 1
+                    
+                    # Populate our mappings while we're iterating
+                    if market_title:
+                        asset_to_market[aid] = market_title[:80]
+                    
+                    if t.get("outcome"):
+                        asset_outcome[aid] = t["outcome"].title()
 
-        ASSET_IDS = list(seen)
-        print(f"Found {len(ASSET_IDS)} total asset IDs")
-        print(f"Allowing {len(allowed_asset_ids)} asset IDs (first per market)")
-        print(f"Populated {len(asset_to_market)} market titles")
-        print(f"Populated {len(asset_outcome)} outcome labels")
+            ASSET_IDS = list(seen)
+            
+        if initial_load:
+            print(f"Found {len(ASSET_IDS)} total asset IDs")
+            print(f"Allowing {len(allowed_asset_ids)} asset IDs (first per market)")
+            print(f"Populated {len(asset_to_market)} market titles")
+            print(f"Populated {len(asset_outcome)} outcome labels")
+        elif new_assets > 0:
+            print(f"Updated: Found {new_assets} new allowed asset IDs (total: {len(allowed_asset_ids)})")
+            
     except Exception as e:
         print(f"Error fetching markets: {e}")
-        ASSET_IDS = []
+        if initial_load:
+            ASSET_IDS = []
+
+def periodic_trades_fetcher():
+    """Periodically fetch trades to keep asset IDs updated."""
+    while True:
+        time.sleep(TRADES_UPDATE_INTERVAL)
+        try:
+            fetch_markets_and_populate_data(initial_load=False)
+        except Exception as e:
+            print(f"Error in periodic trades fetcher: {e}")
 
 def write_event(e):
-    captured_events.append(e)
+    """Write event immediately to file."""
+    global outfile_handle
+    if outfile_handle:
+        with file_lock:
+            try:
+                outfile_handle.write(json.dumps(e) + "\n")
+                outfile_handle.flush()  # Ensure data is written immediately
+            except Exception as ex:
+                print(f"Error writing event to file: {ex}")
 
 def on_message(ws, msg):
     global start_time
@@ -85,8 +126,14 @@ def on_message(ws, msg):
             et = data.get("event_type", "unknown")
             asset_id = data.get("asset_id", "unknown")
             
+            # Thread-safe access to allowed_asset_ids
+            with data_lock:
+                is_allowed = asset_id in allowed_asset_ids
+                market_title = asset_to_market.get(asset_id, "")
+                outcome = asset_outcome.get(asset_id, "")
+            
             # Skip events for asset_ids that are not the first seen for their market
-            if asset_id not in allowed_asset_ids:
+            if not is_allowed:
                 continue
             
             # Skip events with duplicate hashes
@@ -101,8 +148,8 @@ def on_message(ws, msg):
                 "event_type": et,
                 "asset_id": asset_id,
                 "market": data.get("market"),
-                "market_title": asset_to_market.get(asset_id, ""),
-                "outcome": asset_outcome.get(asset_id, ""),
+                "market_title": market_title,
+                "outcome": outcome,
             }
 
             if et == "book":
@@ -150,20 +197,20 @@ def on_message(ws, msg):
 
         # Stop after CAPTURE_SECONDS
         if start_time and (time.time() - start_time) > CAPTURE_SECONDS:
-            print(f"\nCaptured {len(captured_events)} events. Saving to fixture...")
+            print(f"\nCapture time completed. Closing...")
             save_and_exit(ws)
 
     except Exception as e:
         print(f"Error processing message: {e}")
 
 def save_and_exit(ws):
+    global outfile_handle
     try:
-        with open(OUTFILE, "w") as f:
-            for e in captured_events:
-                f.write(json.dumps(e) + "\n")
-        print(f"Saved {len(captured_events)} events to {OUTFILE}")
+        if outfile_handle:
+            outfile_handle.close()
+            print(f"Data stream closed and saved to {OUTFILE}")
     except Exception as e:
-        print(f"Error saving data: {e}")
+        print(f"Error closing file: {e}")
     finally:
         try:
             ws.close()
@@ -192,7 +239,22 @@ def on_open(ws):
 
 if __name__ == "__main__":
     print("Capturing Polymarket L2 order book data...")
+    
+    # Open file for live writing
+    try:
+        outfile_handle = open(OUTFILE, "w")
+        print(f"Opened {OUTFILE} for live writing")
+    except Exception as e:
+        print(f"Error opening output file: {e}")
+        exit(1)
+    
+    # Fetch initial markets data
     fetch_markets_and_populate_data()
+    
+    # Start periodic trades fetcher thread
+    trades_thread = threading.Thread(target=periodic_trades_fetcher, daemon=True)
+    trades_thread.start()
+    print(f"Started periodic trades fetcher (updates every {TRADES_UPDATE_INTERVAL}s)")
 
     ws = WebSocketApp(
         WS_BASE,
@@ -207,3 +269,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nStopping data capture...")
         save_and_exit(ws)
+    finally:
+        if outfile_handle:
+            try:
+                outfile_handle.close()
+            except:
+                pass

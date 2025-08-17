@@ -1,4 +1,5 @@
-## Problems
+## Pain Points
+* Gamma api isn't easy to turn into market_ids
 * Doesn't update markets/outcomes periodically
 
 ## Future Directions
