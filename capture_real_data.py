@@ -16,6 +16,10 @@ captured_events = []
 start_time = None
 CAPTURE_SECONDS = 5  # adjust as needed
 
+# Asset ID to market title mapping and outcome mapping
+asset_to_market = {}
+asset_outcome = {}
+
 def fetch_markets_and_populate_data():
     """Fetch recent trades and collect distinct asset (token) IDs."""
     global ASSET_IDS
@@ -31,9 +35,18 @@ def fetch_markets_and_populate_data():
             aid = t.get("asset")
             if aid and aid not in seen:
                 seen.add(aid)
+                
+                # Populate our mappings while we're iterating
+                if t.get("title"):
+                    asset_to_market[aid] = t["title"][:80]
+                
+                if t.get("outcome"):
+                    asset_outcome[aid] = t["outcome"].title()
 
         ASSET_IDS = list(seen)
         print(f"Using {len(ASSET_IDS)} asset IDs for data capture")
+        print(f"Populated {len(asset_to_market)} market titles")
+        print(f"Populated {len(asset_outcome)} outcome labels")
     except Exception as e:
         print(f"Error fetching markets: {e}")
         ASSET_IDS = []
@@ -51,11 +64,14 @@ def on_message(ws, msg):
 
         for data in events:
             et = data.get("event_type", "unknown")
+            asset_id = data.get("asset_id", "unknown")
             base = {
                 "ts_ms": now_ms,
                 "event_type": et,
-                "asset_id": data.get("asset_id", "unknown"),
+                "asset_id": asset_id,
                 "market": data.get("market"),
+                "market_title": asset_to_market.get(asset_id, ""),
+                "outcome": asset_outcome.get(asset_id, ""),
             }
 
             if et == "book":
@@ -72,6 +88,9 @@ def on_message(ws, msg):
 
             elif et == "price_change":
                 # Per-price deltas (new aggregate size at price level)
+                # Remove market_title and outcome to save space since they can be reconstructed from book events
+                del base["market_title"]
+                del base["outcome"]
                 base.update({
                     "changes": data.get("changes", []),   # [{price, side, size}, ...]
                     "timestamp": data.get("timestamp"),
@@ -138,7 +157,8 @@ def on_open(ws):
     print(f"Subscribing to {len(ASSET_IDS)} asset IDs on Market channel...")
     # As per docs, subscribe with assets_ids + type="market"
     # (auth not required for Market channel)
-    sub = {"assets_ids": ASSET_IDS, "type": "market"}
+    # Explicitly request initial book dumps
+    sub = {"assets_ids": ASSET_IDS, "type": "market", "initial_dump": True}
     ws.send(json.dumps(sub))
     print(f"Subscription sent. Capturing for ~{CAPTURE_SECONDS}s...")
 
