@@ -23,6 +23,9 @@ pst_tz = pytz.timezone('US/Pacific')
 current_pst_reference = None
 reference_timestamp_ms = None
 
+# Last trade data for duplicate filtering
+last_trade = None
+
 # Asset ID to market title mapping and outcome mapping
 asset_to_market = {}
 asset_outcome = {}
@@ -132,11 +135,45 @@ def calculate_ms_since_reference(current_timestamp_ms):
     return current_timestamp_ms - reference_timestamp_ms if reference_timestamp_ms else 0
 
 def print_trade_line(price_k, size_str, side, outcome, ms_ago, market):
-    """Print a formatted trade line"""
-    global line_count
+    """Print a formatted trade line with duplicate filtering"""
+    global line_count, last_trade
     
+    # Create current trade data
+    current_trade = {
+        'price_k': price_k,
+        'size_str': size_str,
+        'side': side,
+        'outcome': outcome,
+        'ms_ago': ms_ago,
+        'market': market
+    }
+    
+    # Check for back-to-back duplicates
+    if last_trade is not None:
+        is_duplicate = (
+            # Same market
+            current_trade['market'] == last_trade['market'] and
+            # Same timestamp
+            current_trade['ms_ago'] == last_trade['ms_ago'] and
+            # Same size
+            current_trade['size_str'] == last_trade['size_str'] and
+            # Opposite sides
+            ((current_trade['side'] == 'BUY' and last_trade['side'] == 'SELL') or
+             (current_trade['side'] == 'SELL' and last_trade['side'] == 'BUY')) and
+            # Prices add up to 1000
+            current_trade['price_k'] + last_trade['price_k'] == 1000
+        )
+        
+        if is_duplicate:
+            # Skip printing this duplicate
+            return
+    
+    # Not a duplicate, print the trade
     print(f'{price_k:>5} | {size_str:>8} | {side:>4} | {outcome:<8} | {ms_ago:>4} | {market}')
     line_count += 1
+    
+    # Update last_trade for next comparison
+    last_trade = current_trade
     
     # Show schema every 50 lines
     if line_count % 50 == 0:
@@ -150,7 +187,7 @@ def process_event_data(data, current_timestamp_ms):
     
     # Get market title
     market = asset_to_market.get(asset_id, f"Asset {asset_id[:8]}...")
-    market = market[:80] + "..." if len(market) > 80 else market
+    market = market[:120] + "..." if len(market) > 120 else market
     
     ms_ago = calculate_ms_since_reference(current_timestamp_ms)
     
