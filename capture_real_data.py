@@ -14,7 +14,7 @@ OUTFILE = "orderbook_clip.jsonl"
 ASSET_IDS = []
 captured_events = []
 start_time = None
-CAPTURE_SECONDS = 5  # adjust as needed
+CAPTURE_SECONDS = 60  # adjust as needed
 
 # Asset ID to market title mapping and outcome mapping
 asset_to_market = {}
