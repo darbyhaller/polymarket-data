@@ -73,7 +73,7 @@ def fetch_markets_and_populate_data():
                 
                 # Populate our mappings
                 if trade.get("title"):
-                    asset_to_market[asset_id] = trade["title"][:45]
+                    asset_to_market[asset_id] = trade["title"][:80]
                 
                 if trade.get("outcome"):
                     asset_outcome[asset_id] = trade["outcome"].title()
@@ -185,7 +185,7 @@ def process_event_data(data, current_timestamp_ms):
     
     # Get market title
     market = asset_to_market.get(asset_id, f"Asset {asset_id[:8]}...")
-    market = market[:120] + "..." if len(market) > 120 else market
+    market = market[:80] + "..." if len(market) > 80 else market
     
     ms_ago = calculate_ms_since_reference(current_timestamp_ms)
     
