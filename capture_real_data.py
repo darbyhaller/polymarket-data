@@ -15,8 +15,8 @@ OUTFILE = "orderbook_clip.jsonl"
 
 ASSET_IDS = []
 start_time = None
-CAPTURE_SECONDS = 60  # adjust as needed
-TRADES_UPDATE_INTERVAL = 30  # seconds between trades API calls
+CAPTURE_SECONDS = 3600 * 8  # adjust as needed
+TRADES_UPDATE_INTERVAL = 10  # seconds between trades API calls
 
 # Asset ID to market title mapping and outcome mapping
 asset_to_market = {}
@@ -42,7 +42,11 @@ def fetch_markets_and_populate_data(initial_load=True):
     try:
         if initial_load:
             print("Fetching recent trades to find active assets...")
-        resp = requests.get("https://data-api.polymarket.com/trades?limit=100000", timeout=20)
+            trades_to_load = "1000000"
+        else:
+            trades_to_load = "5000"
+            # usually 10k/minute, this handles bursts of 3x (30k/minute)
+        resp = requests.get("https://data-api.polymarket.com/trades?limit="+trades_to_load, timeout=20)
         resp.raise_for_status()
         trades = resp.json()
         if initial_load:
