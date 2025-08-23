@@ -14,14 +14,16 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 from collections import deque
 
-def load_crypto_data(filename: str, title_filter: str = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Load Bitcoin and Ethereum L1 data with optional filtering."""
+def load_crypto_data(filename: str, title_filter: str = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load Bitcoin, Ethereum, XRP, and Solana L1 data with optional filtering."""
     print(f"Loading crypto data from {filename}...")
     if title_filter:
         print(f"Filtering for markets containing: '{title_filter}'")
     
     bitcoin_data = []
     ethereum_data = []
+    xrp_data = []
+    solana_data = []
     
     with open(filename, 'r') as f:
         for line_num, line in enumerate(f, 1):
@@ -38,11 +40,15 @@ def load_crypto_data(filename: str, title_filter: str = None) -> Tuple[pd.DataFr
                 if title_filter and title_filter.lower() not in market_title:
                     continue
                 
-                # Separate Bitcoin and Ethereum data
+                # Separate crypto data by type
                 if 'bitcoin' in market_title:
                     bitcoin_data.append(record)
                 elif 'ethereum' in market_title:
                     ethereum_data.append(record)
+                elif 'xrp' in market_title:
+                    xrp_data.append(record)
+                elif 'solana' in market_title:
+                    solana_data.append(record)
                 
                 if line_num % 10000 == 0:
                     print(f"Processed {line_num} records...")
@@ -54,13 +60,15 @@ def load_crypto_data(filename: str, title_filter: str = None) -> Tuple[pd.DataFr
                 print(f"Error processing line {line_num}: {e}")
                 continue
     
-    print(f"Loaded {len(bitcoin_data)} Bitcoin records, {len(ethereum_data)} Ethereum records")
+    print(f"Loaded {len(bitcoin_data)} Bitcoin, {len(ethereum_data)} Ethereum, {len(xrp_data)} XRP, {len(solana_data)} Solana records")
     
     # Convert to DataFrames
     bitcoin_df = pd.DataFrame(bitcoin_data) if bitcoin_data else pd.DataFrame()
     ethereum_df = pd.DataFrame(ethereum_data) if ethereum_data else pd.DataFrame()
+    xrp_df = pd.DataFrame(xrp_data) if xrp_data else pd.DataFrame()
+    solana_df = pd.DataFrame(solana_data) if solana_data else pd.DataFrame()
     
-    for df in [bitcoin_df, ethereum_df]:
+    for df in [bitcoin_df, ethereum_df, xrp_df, solana_df]:
         if not df.empty:
             df['datetime'] = pd.to_datetime(df['ts_ms'], unit='ms')
             # Convert price columns to numeric
@@ -68,7 +76,7 @@ def load_crypto_data(filename: str, title_filter: str = None) -> Tuple[pd.DataFr
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    return bitcoin_df, ethereum_df
+    return bitcoin_df, ethereum_df, xrp_df, solana_df
 
 class CrossoverDetector:
     """Detects Bitcoin bid/ask crossovers and measures ETH responses."""
@@ -152,26 +160,30 @@ class CrossoverDetector:
         
         print(f"Found {len(crossovers)} Bitcoin crossover events")
         return crossovers
-    def measure_eth_responses(self, crossovers: List[Dict], ethereum_df: pd.DataFrame,
-                            eth_stability_threshold: float = 0.001) -> List[Dict]:
+    def measure_crypto_responses(self, crossovers: List[Dict], crypto_dfs: Dict[str, pd.DataFrame],
+                               stability_threshold: float = 0.001) -> List[Dict]:
         """
-        For each crossover event, measure ETH price changes at 200ms, 400ms, 600ms, 800ms, 1000ms intervals.
-        Filter out events where ETH has already changed significantly in the last second.
+        For each crossover event, measure combined crypto price changes at 200ms, 400ms, 600ms, 800ms, 1000ms intervals.
+        Filter out events where any crypto has already changed significantly in the last second.
+        Treats ETH, XRP, and Solana changes as equal and averages them together.
         
         Args:
             crossovers: List of crossover events
-            ethereum_df: ETH price data
-            eth_stability_threshold: Maximum allowed ETH price change in the last 1000ms (default: 0.001 = 0.1%)
+            crypto_dfs: Dict of crypto DataFrames {'ETH': df, 'XRP': df, 'SOL': df}
+            stability_threshold: Maximum allowed price change in the last 1000ms (default: 0.001 = 0.1%)
         """
-        print(f"Measuring ETH responses for {len(crossovers)} crossover events...")
-        print(f"Filtering out events where ETH changed more than {eth_stability_threshold*100:.1f}% in the last 1000ms...")
+        crypto_names = list(crypto_dfs.keys())
+        print(f"Measuring combined {', '.join(crypto_names)} responses for {len(crossovers)} crossover events...")
+        print(f"Filtering out events where any crypto changed more than {stability_threshold*100:.1f}% in the last 1000ms...")
         
-        # Sort ethereum data by timestamp
-        ethereum_df = ethereum_df.sort_values('ts_ms').copy()
-        ethereum_df = ethereum_df.dropna(subset=['mid_price'])
+        # Sort and clean all crypto data
+        for name, df in crypto_dfs.items():
+            if not df.empty:
+                crypto_dfs[name] = df.sort_values('ts_ms').copy().dropna(subset=['mid_price'])
         
-        if len(ethereum_df) == 0:
-            print("No ETH data available for response measurement")
+        # Check if we have any data
+        if all(df.empty for df in crypto_dfs.values()):
+            print("No crypto data available for response measurement")
             return []
         
         response_intervals = [200, 400, 600, 800, 1000]  # 200ms, 400ms, 600ms, 800ms, 1000ms
@@ -180,69 +192,94 @@ class CrossoverDetector:
         
         for crossover in crossovers:
             crossover_time = crossover['time']
+            should_filter = False
+            crypto_prices_before = {}
             
-            # Find ETH price at crossover time (or closest before)
-            eth_before_mask = ethereum_df['ts_ms'] <= crossover_time
-            if not eth_before_mask.any():
-                continue
-                
-            eth_before_idx = ethereum_df[eth_before_mask]['ts_ms'].idxmax()
-            eth_price_before = ethereum_df.loc[eth_before_idx, 'mid_price']
-            
-            # Check ETH stability in the last 1000ms before crossover
-            stability_check_time = crossover_time - 1000  # 1 second ago
-            eth_stability_mask = ethereum_df['ts_ms'] <= stability_check_time
-            
-            if eth_stability_mask.any():
-                eth_stability_idx = ethereum_df[eth_stability_mask]['ts_ms'].idxmax()
-                eth_price_1s_ago = ethereum_df.loc[eth_stability_idx, 'mid_price']
-                
-                # Calculate relative price change in the last second
-                if eth_price_1s_ago > 0:
-                    eth_change_last_1s = abs(eth_price_before - eth_price_1s_ago) / eth_price_1s_ago
+            # Check stability and get baseline prices for each crypto
+            for crypto_name, crypto_df in crypto_dfs.items():
+                if crypto_df.empty:
+                    continue
                     
-                    # Filter out if ETH has changed too much in the last second
-                    if eth_change_last_1s > eth_stability_threshold:
-                        filtered_count += 1
-                        continue
+                # Find crypto price at crossover time (or closest before)
+                crypto_before_mask = crypto_df['ts_ms'] <= crossover_time
+                if not crypto_before_mask.any():
+                    continue
+                    
+                crypto_before_idx = crypto_df[crypto_before_mask]['ts_ms'].idxmax()
+                crypto_price_before = crypto_df.loc[crypto_before_idx, 'mid_price']
+                crypto_prices_before[crypto_name] = crypto_price_before
+                
+                # Check stability in the last 1000ms before crossover
+                stability_check_time = crossover_time - 1000  # 1 second ago
+                crypto_stability_mask = crypto_df['ts_ms'] <= stability_check_time
+                
+                if crypto_stability_mask.any():
+                    crypto_stability_idx = crypto_df[crypto_stability_mask]['ts_ms'].idxmax()
+                    crypto_price_1s_ago = crypto_df.loc[crypto_stability_idx, 'mid_price']
+                    
+                    # Calculate relative price change in the last second
+                    if crypto_price_1s_ago > 0:
+                        crypto_change_last_1s = abs(crypto_price_before - crypto_price_1s_ago) / crypto_price_1s_ago
+                        
+                        # Filter out if this crypto has changed too much in the last second
+                        if crypto_change_last_1s > stability_threshold:
+                            should_filter = True
+                            break
             
-            # Measure price changes at each interval
-            interval_changes = {}
+            if should_filter:
+                filtered_count += 1
+                continue
+            
+            # Measure price changes at each interval and combine them
+            combined_interval_changes = {}
             
             for interval_ms in response_intervals:
                 target_time = crossover_time + interval_ms
+                interval_changes = []
                 
-                # Find closest ETH price at target time
-                time_diffs = abs(ethereum_df['ts_ms'] - target_time)
-                if len(time_diffs) == 0:
-                    continue
+                # Collect changes from all cryptos for this interval
+                for crypto_name, crypto_df in crypto_dfs.items():
+                    if crypto_df.empty or crypto_name not in crypto_prices_before:
+                        continue
+                        
+                    crypto_price_before = crypto_prices_before[crypto_name]
                     
-                closest_idx = time_diffs.idxmin()
+                    # Find closest crypto price at target time
+                    time_diffs = abs(crypto_df['ts_ms'] - target_time)
+                    if len(time_diffs) == 0:
+                        continue
+                        
+                    closest_idx = time_diffs.idxmin()
+                    
+                    # Only use if reasonably close to target time (within 50% of interval)
+                    if time_diffs[closest_idx] <= interval_ms * 0.5:
+                        crypto_price_after = crypto_df.loc[closest_idx, 'mid_price']
+                        # Calculate relative price change (percentage)
+                        if crypto_price_before > 0:
+                            relative_change = (crypto_price_after - crypto_price_before) / crypto_price_before
+                            interval_changes.append(relative_change)
                 
-                # Only use if reasonably close to target time (within 50% of interval)
-                if time_diffs[closest_idx] <= interval_ms * 0.5:
-                    eth_price_after = ethereum_df.loc[closest_idx, 'mid_price']
-                    price_change = eth_price_after - eth_price_before
-                    interval_changes[f'{interval_ms}ms'] = price_change
+                # Average the changes across all cryptos for this interval
+                if interval_changes:
+                    combined_interval_changes[f'{interval_ms}ms'] = np.mean(interval_changes)
             
             # Only include if we have at least some interval measurements
-            if interval_changes:
+            if combined_interval_changes:
                 result = crossover.copy()
-                result['eth_price_before'] = eth_price_before
-                result['eth_changes'] = interval_changes
+                result['crypto_prices_before'] = crypto_prices_before
+                result['combined_changes'] = combined_interval_changes
                 results.append(result)
         
-        print(f"Filtered out {filtered_count} events where ETH was unstable in the last 1000ms")
-        print(f"Successfully measured ETH responses for {len(results)} crossover events")
-        return results
+        print(f"Filtered out {filtered_count} events where cryptos were unstable in the last 1000ms")
+        print(f"Successfully measured combined crypto responses for {len(results)} crossover events")
         return results
 
 def analyze_crossover_results(results: List[Dict]) -> Dict:
-    """Analyze and average the crossover results."""
+    """Analyze and average the crossover results for combined cryptocurrency responses."""
     if not results:
         return {}
     
-    print(f"Analyzing {len(results)} crossover events with ETH responses...")
+    print(f"Analyzing {len(results)} crossover events with combined crypto responses...")
     
     # Separate by crossover type
     bid_crosses_ask = [r for r in results if r['type'] == 'bid_crosses_ask']
@@ -266,12 +303,12 @@ def analyze_crossover_results(results: List[Dict]) -> Dict:
             'interval_averages': {}
         }
         
-        # Calculate average ETH change for each interval
+        # Calculate average combined change for each interval
         for interval in analysis['intervals']:
             changes = []
             for event in events:
-                if interval in event['eth_changes']:
-                    changes.append(event['eth_changes'][interval])
+                if 'combined_changes' in event and interval in event['combined_changes']:
+                    changes.append(event['combined_changes'][interval])
             
             if changes:
                 type_analysis['interval_averages'][interval] = {
@@ -286,48 +323,49 @@ def analyze_crossover_results(results: List[Dict]) -> Dict:
     return analysis
 
 def create_analysis_plot(analysis: Dict, output_file: str = None):
-    """Create visualization of crossover analysis results."""
+    """Create visualization of combined cryptocurrency crossover analysis results."""
     if not analysis or analysis['total_events'] == 0:
         print("No data to plot")
         return None
     
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-    
     intervals = analysis['intervals']
     
-    # Plot 1: Average ETH changes for bid crosses ask
+    # Create simple 2x2 subplot layout
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # Plot 1: Combined crypto response to bid crosses ask
     if 'bid_crosses_ask' in analysis and analysis['bid_crosses_ask']['interval_averages']:
         bid_data = analysis['bid_crosses_ask']['interval_averages']
         means = [bid_data.get(interval, {}).get('mean', 0) for interval in intervals]
         stds = [bid_data.get(interval, {}).get('std', 0) for interval in intervals]
         
         ax1.bar(intervals, means, yerr=stds, alpha=0.7, color='blue', capsize=5)
-        ax1.set_title(f'ETH Response to Bitcoin Bid Crossing Ask\n({analysis["bid_crosses_ask"]["count"]} events)')
-        ax1.set_ylabel('Average ETH Price Change')
+        ax1.set_title(f'Combined Crypto Response to Bitcoin Bid Crossing Ask\n({analysis["bid_crosses_ask"]["count"]} events)')
+        ax1.set_ylabel('Average Relative Price Change')
         ax1.set_xlabel('Time Interval')
         ax1.grid(True, alpha=0.3)
         ax1.axhline(y=0, color='black', linestyle='-', alpha=0.5)
     else:
         ax1.text(0.5, 0.5, 'No bid crosses ask events', ha='center', va='center', transform=ax1.transAxes)
-        ax1.set_title('ETH Response to Bitcoin Bid Crossing Ask')
+        ax1.set_title('Combined Crypto Response to Bitcoin Bid Crossing Ask')
     
-    # Plot 2: Average ETH changes for ask crosses bid
+    # Plot 2: Combined crypto response to ask crosses bid
     if 'ask_crosses_bid' in analysis and analysis['ask_crosses_bid']['interval_averages']:
         ask_data = analysis['ask_crosses_bid']['interval_averages']
         means = [ask_data.get(interval, {}).get('mean', 0) for interval in intervals]
         stds = [ask_data.get(interval, {}).get('std', 0) for interval in intervals]
         
         ax2.bar(intervals, means, yerr=stds, alpha=0.7, color='red', capsize=5)
-        ax2.set_title(f'ETH Response to Bitcoin Ask Crossing Bid\n({analysis["ask_crosses_bid"]["count"]} events)')
-        ax2.set_ylabel('Average ETH Price Change')
+        ax2.set_title(f'Combined Crypto Response to Bitcoin Ask Crossing Bid\n({analysis["ask_crosses_bid"]["count"]} events)')
+        ax2.set_ylabel('Average Relative Price Change')
         ax2.set_xlabel('Time Interval')
         ax2.grid(True, alpha=0.3)
         ax2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
     else:
         ax2.text(0.5, 0.5, 'No ask crosses bid events', ha='center', va='center', transform=ax2.transAxes)
-        ax2.set_title('ETH Response to Bitcoin Ask Crossing Bid')
+        ax2.set_title('Combined Crypto Response to Bitcoin Ask Crossing Bid')
     
-    # Plot 3: Combined average changes
+    # Plot 3: Overall combined response
     combined_means = []
     combined_stds = []
     
@@ -352,8 +390,8 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
             combined_stds.append(0)
     
     ax3.bar(intervals, combined_means, yerr=combined_stds, alpha=0.7, color='green', capsize=5)
-    ax3.set_title(f'Combined ETH Response to All Bitcoin Crossovers\n({analysis["total_events"]} total events)')
-    ax3.set_ylabel('Average ETH Price Change')
+    ax3.set_title(f'Overall Combined Crypto Response to All Bitcoin Crossovers\n({analysis["total_events"]} total events)')
+    ax3.set_ylabel('Average Relative Price Change')
     ax3.set_xlabel('Time Interval')
     ax3.grid(True, alpha=0.3)
     ax3.axhline(y=0, color='black', linestyle='-', alpha=0.5)
@@ -367,7 +405,7 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
         ['Bid Crosses Ask Events', f"{analysis['bid_crosses_ask_count']}"],
         ['Ask Crosses Bid Events', f"{analysis['ask_crosses_bid_count']}"],
         ['', ''],
-        ['Average ETH Changes:', '']
+        ['Average Combined Changes:', '']
     ]
     
     for interval in intervals:
@@ -397,14 +435,14 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Bitcoin Crossover ETH Analysis - Detects when Bitcoin bid reaches WINDOW ms ago\'s ask (or vice versa) and measures ETH price changes.',
+        description='Bitcoin Crossover Crypto Analysis - Detects when Bitcoin bid reaches WINDOW ms ago\'s ask (or vice versa) and measures combined ETH/XRP/Solana price changes.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
   python bitcoin_crossover_eth_analysis.py l1_data.jsonl
   python bitcoin_crossover_eth_analysis.py l1_data.jsonl --window 500
   python bitcoin_crossover_eth_analysis.py l1_data.jsonl --title-filter "12AM ET" --window 2000
-  python bitcoin_crossover_eth_analysis.py l1_data.jsonl --eth-stability-threshold 0.005
+  python bitcoin_crossover_eth_analysis.py l1_data.jsonl --stability-threshold 0.005
         '''
     )
     
@@ -419,37 +457,54 @@ Examples:
     parser.add_argument('--title-filter', '-t',
                        help='Filter markets by title containing this string')
     
-    parser.add_argument('--eth-stability-threshold', '-s',
+    parser.add_argument('--stability-threshold', '-s',
                        type=float,
                        default=0.001,
-                       help='Maximum allowed ETH price change in the last 1000ms to consider stable (default: 0.001 = 0.1%%)')
+                       help='Maximum allowed crypto price change in the last 1000ms to consider stable (default: 0.001 = 0.1%%)')
     
     args = parser.parse_args()
     
     input_file = args.input_file
     title_filter = args.title_filter
     window_ms = args.window
-    eth_stability_threshold = args.eth_stability_threshold
+    stability_threshold = args.stability_threshold
     
     try:
-        # Load Bitcoin and Ethereum data
-        bitcoin_df, ethereum_df = load_crypto_data(input_file, title_filter)
+        # Load all crypto data
+        bitcoin_df, ethereum_df, xrp_df, solana_df = load_crypto_data(input_file, title_filter)
         
-        if bitcoin_df.empty or ethereum_df.empty:
-            print("Need both Bitcoin and Ethereum data!")
+        if bitcoin_df.empty:
+            print("Need Bitcoin data!")
+            sys.exit(1)
+        
+        # Check which cryptos we have data for
+        crypto_dfs = {}
+        if not ethereum_df.empty:
+            crypto_dfs['ETH'] = ethereum_df
+        if not xrp_df.empty:
+            crypto_dfs['XRP'] = xrp_df
+        if not solana_df.empty:
+            crypto_dfs['SOL'] = solana_df
+        
+        if not crypto_dfs:
+            print("Need at least one of: Ethereum, XRP, or Solana data!")
             sys.exit(1)
         
         # Get the most active assets
         bitcoin_asset = bitcoin_df['asset_id'].value_counts().index[0]
-        ethereum_asset = ethereum_df['asset_id'].value_counts().index[0]
-        
         bitcoin_data = bitcoin_df[bitcoin_df['asset_id'] == bitcoin_asset].copy()
-        ethereum_data = ethereum_df[ethereum_df['asset_id'] == ethereum_asset].copy()
+        
+        # Get most active asset for each crypto
+        for crypto_name, crypto_df in crypto_dfs.items():
+            crypto_asset = crypto_df['asset_id'].value_counts().index[0]
+            crypto_dfs[crypto_name] = crypto_df[crypto_df['asset_id'] == crypto_asset].copy()
         
         print(f"\nAnalyzing:")
         print(f"Bitcoin: {bitcoin_data['market_title'].iloc[0]} ({len(bitcoin_data)} points)")
-        print(f"Ethereum: {ethereum_data['market_title'].iloc[0]} ({len(ethereum_data)} points)")
+        for crypto_name, crypto_df in crypto_dfs.items():
+            print(f"{crypto_name}: {crypto_df['market_title'].iloc[0]} ({len(crypto_df)} points)")
         print(f"Window: {window_ms}ms")
+        print(f"Stability threshold: {stability_threshold*100:.1f}%")
         
         # Initialize crossover detector
         detector = CrossoverDetector(window_ms=window_ms)
@@ -461,11 +516,11 @@ Examples:
             print("No crossover events found!")
             sys.exit(1)
         
-        # Measure ETH responses
-        results = detector.measure_eth_responses(crossovers, ethereum_data, eth_stability_threshold)
+        # Measure combined crypto responses
+        results = detector.measure_crypto_responses(crossovers, crypto_dfs, stability_threshold)
         
         if not results:
-            print("No ETH response data could be measured!")
+            print("No crypto response data could be measured!")
             sys.exit(1)
         
         # Analyze results
@@ -476,24 +531,26 @@ Examples:
         if title_filter:
             filter_suffix += f"_filtered_{title_filter.replace(' ', '_')}"
         
-        output_file = f"bitcoin_crossover_eth_analysis{filter_suffix}_w{window_ms}ms.png"
+        crypto_suffix = "_".join(crypto_dfs.keys())
+        output_file = f"bitcoin_crossover_{crypto_suffix}_analysis{filter_suffix}_w{window_ms}ms.png"
         
         fig = create_analysis_plot(analysis, output_file=output_file)
         
         # Print detailed results
         print(f"\n" + "="*70)
-        print(f"BITCOIN CROSSOVER → ETHEREUM RESPONSE ANALYSIS")
+        print(f"BITCOIN CROSSOVER → COMBINED CRYPTO RESPONSE ANALYSIS")
         print(f"="*70)
         print(f"Bitcoin Market: {bitcoin_data['market_title'].iloc[0]}")
-        print(f"Ethereum Market: {ethereum_data['market_title'].iloc[0]}")
+        print(f"Analyzed Cryptos: {', '.join(crypto_dfs.keys())}")
         print(f"Analysis Window: {window_ms} ms")
+        print(f"Stability Threshold: {stability_threshold*100:.1f}%")
         
         print(f"\nCROSSOVER EVENTS:")
         print(f"  Total crossover events: {analysis['total_events']}")
         print(f"  Bid crosses ask events: {analysis['bid_crosses_ask_count']}")
         print(f"  Ask crosses bid events: {analysis['ask_crosses_bid_count']}")
         
-        print(f"\nAVERAGE ETH RESPONSES:")
+        print(f"\nAVERAGE COMBINED CRYPTO RESPONSES:")
         intervals = ['200ms', '400ms', '600ms', '800ms', '1000ms']
         
         for event_type in ['bid_crosses_ask', 'ask_crosses_bid']:
