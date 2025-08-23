@@ -6,7 +6,7 @@
 * Ground with search
 * Reinforcement learning on trades
 * Use e^(sentence bert sim of titles) as prior edge weight between markets
-
+* graph in logits
 
 ## Stats
 * Tokens/s: 10K

@@ -13,9 +13,11 @@ from datetime import datetime
 from collections import Counter
 import numpy as np
 
-def load_and_analyze_l1_data(filename):
+def load_and_analyze_l1_data(filename, title_filter=None):
     """Load L1 data and identify top 5 most active assets."""
     print(f"Loading L1 data from {filename}...")
+    if title_filter:
+        print(f"Filtering for markets containing: '{title_filter}'")
     
     data = []
     asset_counts = Counter()
@@ -28,11 +30,18 @@ def load_and_analyze_l1_data(filename):
                 
             try:
                 record = json.loads(line)
+                
+                # Apply title filter if specified
+                if title_filter:
+                    market_title = record.get('market_title', '').lower()
+                    if title_filter.lower() not in market_title:
+                        continue
+                
                 data.append(record)
                 asset_counts[record['asset_id']] += 1
                 
-                if line_num % 1000 == 0:
-                    print(f"Loaded {line_num} records...")
+                if line_num % 10000 == 0:
+                    print(f"Processed {line_num} records...")
                     
             except json.JSONDecodeError as e:
                 print(f"JSON decode error on line {line_num}: {e}")
@@ -42,6 +51,8 @@ def load_and_analyze_l1_data(filename):
                 continue
     
     print(f"Loaded {len(data)} total records")
+    if title_filter:
+        print(f"After filtering for '{title_filter}': {len(data)} records")
     
     # Get top 5 most active assets
     top_5_assets = [asset_id for asset_id, count in asset_counts.most_common(5)]
@@ -187,16 +198,18 @@ def create_visualization(asset_data, output_filename='l1_visualization.png'):
     return output_filename
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python visualize_l1_data.py <l1_data_file>")
+    if len(sys.argv) < 2 or len(sys.argv) > 3:
+        print("Usage: python visualize_l1_data.py <l1_data_file> [title_filter]")
         print("Example: python visualize_l1_data.py test_l1_output.jsonl")
+        print("Example: python visualize_l1_data.py test_l1_output.jsonl '12 AM ET'")
         sys.exit(1)
     
     input_file = sys.argv[1]
+    title_filter = sys.argv[2] if len(sys.argv) == 3 else None
     
     try:
         # Load and analyze data
-        data, top_5_assets = load_and_analyze_l1_data(input_file)
+        data, top_5_assets = load_and_analyze_l1_data(input_file, title_filter)
         
         if not top_5_assets:
             print("No assets found in data!")
@@ -210,7 +223,9 @@ def main():
             sys.exit(1)
         
         # Create visualization
-        output_file = create_visualization(asset_data)
+        filter_suffix = f"_filtered_{title_filter.replace(' ', '_')}" if title_filter else ""
+        output_file = f"l1_visualization{filter_suffix}.png"
+        output_file = create_visualization(asset_data, output_file)
         
         print(f"\nVisualization complete! Open {output_file} to view the graph.")
         
