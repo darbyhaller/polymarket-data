@@ -174,7 +174,7 @@ class CrossoverDetector:
         """
         crypto_names = list(crypto_dfs.keys())
         print(f"Measuring combined {', '.join(crypto_names)} responses for {len(crossovers)} crossover events...")
-        print(f"Filtering out events where any crypto changed more than {stability_threshold*100:.1f}% in the last 1000ms...")
+        print(f"Excluding individual cryptos that changed more than {stability_threshold*100:.1f}% in the last 1000ms...")
         
         # Sort and clean all crypto data
         for name, df in crypto_dfs.items():
@@ -192,8 +192,8 @@ class CrossoverDetector:
         
         for crossover in crossovers:
             crossover_time = crossover['time']
-            should_filter = False
             crypto_prices_before = {}
+            stable_cryptos = set()
             
             # Check stability and get baseline prices for each crypto
             for crypto_name, crypto_df in crypto_dfs.items():
@@ -213,6 +213,7 @@ class CrossoverDetector:
                 stability_check_time = crossover_time - 1000  # 1 second ago
                 crypto_stability_mask = crypto_df['ts_ms'] <= stability_check_time
                 
+                is_stable = True
                 if crypto_stability_mask.any():
                     crypto_stability_idx = crypto_df[crypto_stability_mask]['ts_ms'].idxmax()
                     crypto_price_1s_ago = crypto_df.loc[crypto_stability_idx, 'mid_price']
@@ -221,24 +222,28 @@ class CrossoverDetector:
                     if crypto_price_1s_ago > 0:
                         crypto_change_last_1s = abs(crypto_price_before - crypto_price_1s_ago) / crypto_price_1s_ago
                         
-                        # Filter out if this crypto has changed too much in the last second
+                        # Mark as unstable if this crypto has changed too much in the last second
                         if crypto_change_last_1s > stability_threshold:
-                            should_filter = True
-                            break
+                            is_stable = False
+                
+                if is_stable:
+                    stable_cryptos.add(crypto_name)
             
-            if should_filter:
+            # Skip this event entirely if no cryptos are stable
+            if not stable_cryptos:
                 filtered_count += 1
                 continue
             
-            # Measure price changes at each interval and combine them
+            # Measure price changes at each interval, only for stable cryptos
             combined_interval_changes = {}
             
             for interval_ms in response_intervals:
                 target_time = crossover_time + interval_ms
                 interval_changes = []
                 
-                # Collect changes from all cryptos for this interval
-                for crypto_name, crypto_df in crypto_dfs.items():
+                # Collect changes only from stable cryptos for this interval
+                for crypto_name in stable_cryptos:
+                    crypto_df = crypto_dfs[crypto_name]
                     if crypto_df.empty or crypto_name not in crypto_prices_before:
                         continue
                         
@@ -259,7 +264,7 @@ class CrossoverDetector:
                             relative_change = (crypto_price_after - crypto_price_before) / crypto_price_before
                             interval_changes.append(relative_change)
                 
-                # Average the changes across all cryptos for this interval
+                # Average the changes across stable cryptos for this interval
                 if interval_changes:
                     combined_interval_changes[f'{interval_ms}ms'] = np.mean(interval_changes)
             
@@ -268,9 +273,10 @@ class CrossoverDetector:
                 result = crossover.copy()
                 result['crypto_prices_before'] = crypto_prices_before
                 result['combined_changes'] = combined_interval_changes
+                result['stable_cryptos'] = list(stable_cryptos)  # Track which cryptos were stable
                 results.append(result)
         
-        print(f"Filtered out {filtered_count} events where cryptos were unstable in the last 1000ms")
+        print(f"Filtered out {filtered_count} events where no cryptos were stable in the last 1000ms")
         print(f"Successfully measured combined crypto responses for {len(results)} crossover events")
         return results
 
