@@ -72,14 +72,35 @@ def prepare_data_for_plotting(data, top_5_assets):
     for asset_id in top_5_assets:
         asset_df = df[df['asset_id'] == asset_id].copy()
         
-        # Get market title for this asset
+        # Get market title and outcome for this asset
         market_title = asset_df['market_title'].iloc[0] if not asset_df.empty else f"Asset {asset_id[:8]}..."
+        outcome = asset_df['outcome'].iloc[0] if not asset_df.empty else ""
         
         # Remove rows where both bid and ask are null
         asset_df = asset_df.dropna(subset=['best_bid_price', 'best_ask_price'], how='all')
         
         if asset_df.empty:
             continue
+        
+        # Normalize "Down" and "No" outcomes to show probability of "Up"/"Yes"
+        # For "Down" or "No": bid becomes (1 - ask), ask becomes (1 - bid)
+        should_flip = outcome.lower() in ['down', 'no']
+        
+        if should_flip:
+            print(f"Flipping prices for {outcome} outcome: {market_title[:50]}...")
+            # Store original values
+            original_bid = asset_df['best_bid_price'].copy()
+            original_ask = asset_df['best_ask_price'].copy()
+            
+            # Flip: bid becomes (1 - ask), ask becomes (1 - bid)
+            asset_df['best_bid_price'] = 1 - original_ask
+            asset_df['best_ask_price'] = 1 - original_bid
+            
+            # Update market title to reflect the flip
+            if 'down' in market_title.lower():
+                market_title = market_title.replace('Down', 'Up (flipped)')
+            elif 'no' in outcome.lower():
+                market_title = market_title + ' (No→Yes flipped)'
             
         # Get all non-null prices for normalization
         all_prices = []
@@ -107,12 +128,15 @@ def prepare_data_for_plotting(data, top_5_assets):
         asset_data[asset_id] = {
             'df': asset_df,
             'market_title': market_title,
+            'outcome': outcome,
+            'flipped': should_flip,
             'min_price': min_price,
             'max_price': max_price,
             'original_range': f"{min_price:.4f} - {max_price:.4f}"
         }
         
-        print(f"Asset {asset_id[:8]}... ({market_title[:30]}...): {len(asset_df)} records, price range: {min_price:.4f} - {max_price:.4f}")
+        flip_note = " (FLIPPED)" if should_flip else ""
+        print(f"Asset {asset_id[:8]}... ({market_title[:30]}...): {len(asset_df)} records, price range: {min_price:.4f} - {max_price:.4f}{flip_note}")
     
     return asset_data
 
@@ -143,7 +167,7 @@ def create_visualization(asset_data, output_filename='l1_visualization.png'):
         ask_mask = ~df['normalized_ask'].isna()
         if ask_mask.any():
             plt.plot(df[ask_mask]['datetime'], df[ask_mask]['normalized_ask'], 
-                    color=color, linestyle='--', linewidth=1.5, 
+                    color=color, linestyle='-', linewidth=1.5, 
                     label=f'{label} (Ask)', alpha=0.8)
     
     # Customize the plot
@@ -168,8 +192,8 @@ def create_visualization(asset_data, output_filename='l1_visualization.png'):
     plt.tight_layout()
     
     # Add text box with normalization info
-    info_text = "Note: Prices normalized to 0-100 scale per asset\n(0 = min price, 100 = max price for each asset)"
-    plt.figtext(0.02, 0.02, info_text, fontsize=9, style='italic', 
+    info_text = "Note: Prices normalized to 0-100 scale per asset\n(0 = min price, 100 = max price for each asset)\n'Down' and 'No' outcomes flipped to show Up/Yes probability"
+    plt.figtext(0.02, 0.02, info_text, fontsize=9, style='italic',
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
     
     # Save the plot
@@ -180,7 +204,8 @@ def create_visualization(asset_data, output_filename='l1_visualization.png'):
     print(f"\nSummary:")
     for asset_id, data in asset_data.items():
         print(f"Asset {asset_id[:8]}...: {data['market_title'][:50]}...")
-        print(f"  Original price range: {data['original_range']}")
+        print(f"  Outcome: {data['outcome']} {'(FLIPPED to show Up/Yes probability)' if data['flipped'] else ''}")
+        print(f"  Price range: {data['original_range']}")
         print(f"  Data points: {len(data['df'])}")
         print()
     
