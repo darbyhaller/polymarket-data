@@ -25,18 +25,45 @@ class L1Quote:
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON output."""
+        # Normalize "Down" and "No" outcomes to show probability of "Up"/"Yes"
+        should_flip = self.outcome.lower() in ['down', 'no']
+        
+        if should_flip and self.best_bid_price and self.best_ask_price:
+            try:
+                # Flip prices: bid becomes (1 - ask), ask becomes (1 - bid)
+                original_bid = Decimal(self.best_bid_price)
+                original_ask = Decimal(self.best_ask_price)
+                
+                flipped_bid_price = str(1 - original_ask)
+                flipped_ask_price = str(1 - original_bid)
+                flipped_bid_size = self.best_ask_size  # Size follows the flipped price
+                flipped_ask_size = self.best_bid_size  # Size follows the flipped price
+                
+            except Exception:
+                # Fall back to original if flipping fails
+                flipped_bid_price = self.best_bid_price
+                flipped_ask_price = self.best_ask_price
+                flipped_bid_size = self.best_bid_size
+                flipped_ask_size = self.best_ask_size
+        else:
+            # No flipping needed or not possible
+            flipped_bid_price = self.best_bid_price
+            flipped_ask_price = self.best_ask_price
+            flipped_bid_size = self.best_bid_size
+            flipped_ask_size = self.best_ask_size
+        
         return {
             "ts_ms": self.ts_ms,
             "asset_id": self.asset_id,
             "market": self.market,
             "market_title": self.market_title,
             "outcome": self.outcome,
-            "best_bid_price": self.best_bid_price,
-            "best_bid_size": self.best_bid_size,
-            "best_ask_price": self.best_ask_price,
-            "best_ask_size": self.best_ask_size,
-            "spread": self.calculate_spread(),
-            "mid_price": self.calculate_mid_price()
+            "best_bid_price": flipped_bid_price,
+            "best_bid_size": flipped_bid_size,
+            "best_ask_price": flipped_ask_price,
+            "best_ask_size": flipped_ask_size,
+            "spread": self.calculate_spread_flipped(flipped_bid_price, flipped_ask_price),
+            "mid_price": self.calculate_mid_price_flipped(flipped_bid_price, flipped_ask_price)
         }
     
     def calculate_spread(self) -> Optional[str]:
@@ -56,6 +83,28 @@ class L1Quote:
             try:
                 bid = Decimal(self.best_bid_price)
                 ask = Decimal(self.best_ask_price)
+                return str((bid + ask) / 2)
+            except:
+                return None
+        return None
+    
+    def calculate_spread_flipped(self, bid_price: Optional[str], ask_price: Optional[str]) -> Optional[str]:
+        """Calculate bid-ask spread for flipped prices."""
+        if bid_price and ask_price:
+            try:
+                bid = Decimal(bid_price)
+                ask = Decimal(ask_price)
+                return str(ask - bid)
+            except:
+                return None
+        return None
+    
+    def calculate_mid_price_flipped(self, bid_price: Optional[str], ask_price: Optional[str]) -> Optional[str]:
+        """Calculate mid price for flipped prices."""
+        if bid_price and ask_price:
+            try:
+                bid = Decimal(bid_price)
+                ask = Decimal(ask_price)
                 return str((bid + ask) / 2)
             except:
                 return None
