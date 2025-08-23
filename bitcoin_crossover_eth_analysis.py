@@ -380,8 +380,8 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
     
     intervals = analysis['intervals']
     
-    # Create simple 2x2 subplot layout
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+    # Create simple 1x2 subplot layout
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
     # Plot 1: Combined crypto response to bid crosses ask
     if 'bid_crosses_ask' in analysis and analysis['bid_crosses_ask']['interval_averages']:
@@ -414,66 +414,6 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
     else:
         ax2.text(0.5, 0.5, 'No ask crosses bid events', ha='center', va='center', transform=ax2.transAxes)
         ax2.set_title('Combined Crypto Response to Bitcoin Ask Crossing Bid')
-    
-    # Plot 3: Overall combined response
-    combined_means = []
-    combined_stds = []
-    
-    for interval in intervals:
-        all_changes = []
-        
-        # Collect all changes for this interval across both event types
-        for event_type in ['bid_crosses_ask', 'ask_crosses_bid']:
-            if event_type in analysis and 'interval_averages' in analysis[event_type]:
-                interval_data = analysis[event_type]['interval_averages'].get(interval)
-                if interval_data and 'mean' in interval_data:
-                    # Weight by count to get proper combined average
-                    count = interval_data['count']
-                    mean = interval_data['mean']
-                    all_changes.extend([mean] * count)
-        
-        if all_changes:
-            combined_means.append(np.mean(all_changes))
-            combined_stds.append(np.std(all_changes))
-        else:
-            combined_means.append(0)
-            combined_stds.append(0)
-    
-    ax3.bar(intervals, combined_means, yerr=combined_stds, alpha=0.7, color='green', capsize=5)
-    ax3.set_title(f'Overall Combined Crypto Response to All Bitcoin Crossovers\n({analysis["total_events"]} total events)')
-    ax3.set_ylabel('Average Relative Price Change')
-    ax3.set_xlabel('Time Interval')
-    ax3.grid(True, alpha=0.3)
-    ax3.axhline(y=0, color='black', linestyle='-', alpha=0.5)
-    
-    # Plot 4: Statistics table
-    ax4.axis('off')
-    
-    stats_data = [
-        ['Metric', 'Value'],
-        ['Total Crossover Events', f"{analysis['total_events']}"],
-        ['Bid Crosses Ask Events', f"{analysis['bid_crosses_ask_count']}"],
-        ['Ask Crosses Bid Events', f"{analysis['ask_crosses_bid_count']}"],
-        ['', ''],
-        ['Average Combined Changes:', '']
-    ]
-    
-    for interval in intervals:
-        if combined_means[intervals.index(interval)] != 0:
-            stats_data.append([f'  {interval}', f'{combined_means[intervals.index(interval)]:.6f}'])
-    
-    table = ax4.table(cellText=stats_data, cellLoc='left', loc='center',
-                     colWidths=[0.6, 0.4])
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 1.3)
-    
-    # Style the header row
-    for i in range(2):
-        table[(0, i)].set_facecolor('#E6E6FA')
-        table[(0, i)].set_text_props(weight='bold')
-    
-    ax4.set_title('Analysis Statistics', fontsize=12, pad=20)
     
     plt.tight_layout()
     
