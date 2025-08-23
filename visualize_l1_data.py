@@ -62,7 +62,7 @@ def load_and_analyze_l1_data(filename, title_filter=None):
     
     return data, top_5_assets
 
-def prepare_data_for_plotting(data, top_5_assets):
+def prepare_data_for_plotting(data, top_5_assets, time_filter=None):
     """Prepare data for plotting with normalized prices."""
     print("\nPreparing data for plotting...")
     
@@ -72,6 +72,16 @@ def prepare_data_for_plotting(data, top_5_assets):
     
     # Convert timestamp to datetime
     df['datetime'] = pd.to_datetime(df['ts_ms'], unit='ms')
+    
+    # Apply time range filter if specified
+    if time_filter:
+        start_hour, end_hour = time_filter
+        print(f"Filtering for time range: {start_hour:02d}:00 - {end_hour:02d}:00 UTC")
+        
+        # Filter by hour of day (UTC)
+        df['hour'] = df['datetime'].dt.hour
+        df = df[(df['hour'] >= start_hour) & (df['hour'] < end_hour)]
+        print(f"After time filtering: {len(df)} records")
     
     # Convert price columns to numeric, handling None values
     df['best_bid_price'] = pd.to_numeric(df['best_bid_price'], errors='coerce')
@@ -198,14 +208,31 @@ def create_visualization(asset_data, output_filename='l1_visualization.png'):
     return output_filename
 
 def main():
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("Usage: python visualize_l1_data.py <l1_data_file> [title_filter]")
+    if len(sys.argv) < 2 or len(sys.argv) > 5:
+        print("Usage: python visualize_l1_data.py <l1_data_file> [title_filter] [start_hour] [end_hour]")
         print("Example: python visualize_l1_data.py test_l1_output.jsonl")
-        print("Example: python visualize_l1_data.py test_l1_output.jsonl '12 AM ET'")
+        print("Example: python visualize_l1_data.py test_l1_output.jsonl '12AM ET'")
+        print("Example: python visualize_l1_data.py test_l1_output.jsonl '12AM ET' 4 5")
+        print("Time hours are in UTC (0-23)")
         sys.exit(1)
     
     input_file = sys.argv[1]
-    title_filter = sys.argv[2] if len(sys.argv) == 3 else None
+    title_filter = sys.argv[2] if len(sys.argv) >= 3 else None
+    
+    # Parse time range if provided
+    time_filter = None
+    if len(sys.argv) >= 5:
+        try:
+            start_hour = int(sys.argv[3])
+            end_hour = int(sys.argv[4])
+            if 0 <= start_hour <= 23 and 0 <= end_hour <= 23:
+                time_filter = (start_hour, end_hour)
+            else:
+                print("Error: Hours must be between 0 and 23")
+                sys.exit(1)
+        except ValueError:
+            print("Error: Hours must be integers")
+            sys.exit(1)
     
     try:
         # Load and analyze data
@@ -216,14 +243,19 @@ def main():
             sys.exit(1)
         
         # Prepare data for plotting
-        asset_data = prepare_data_for_plotting(data, top_5_assets)
+        asset_data = prepare_data_for_plotting(data, top_5_assets, time_filter)
         
         if not asset_data:
             print("No valid data found for plotting!")
             sys.exit(1)
         
         # Create visualization
-        filter_suffix = f"_filtered_{title_filter.replace(' ', '_')}" if title_filter else ""
+        filter_suffix = ""
+        if title_filter:
+            filter_suffix += f"_filtered_{title_filter.replace(' ', '_')}"
+        if time_filter:
+            filter_suffix += f"_time_{time_filter[0]:02d}h-{time_filter[1]:02d}h"
+        
         output_file = f"l1_visualization{filter_suffix}.png"
         output_file = create_visualization(asset_data, output_file)
         
