@@ -7,8 +7,9 @@ import json
 import time
 import requests
 import threading
-from threading import Lock
+from threading import Lock, Event
 from websocket import WebSocketApp
+import random
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 OUTFILE = "orderbook_clip.jsonl"
@@ -17,6 +18,20 @@ ASSET_IDS = []
 start_time = None
 CAPTURE_SECONDS = 3600 * 8  # adjust as needed
 TRADES_UPDATE_INTERVAL = 10  # seconds between trades API calls
+
+# WebSocket reconnection settings
+MAX_RECONNECT_ATTEMPTS = 50  # Maximum reconnection attempts
+RECONNECT_BASE_DELAY = 1  # Base delay for exponential backoff (seconds)
+RECONNECT_MAX_DELAY = 60  # Maximum delay between reconnection attempts
+CONNECTION_TIMEOUT = 30  # Connection timeout in seconds
+PING_INTERVAL = 15  # Ping interval in seconds
+PING_TIMEOUT = 5  # Ping timeout in seconds
+
+# Connection state tracking
+ws_connected = Event()
+should_stop = Event()
+reconnect_count = 0
+last_message_time = None
 
 # Asset ID to market title mapping and outcome mapping
 asset_to_market = {}
@@ -35,6 +50,13 @@ file_lock = Lock()
 
 # File handle for live writing
 outfile_handle = None
+
+def calculate_reconnect_delay(attempt):
+    """Calculate exponential backoff delay with jitter."""
+    delay = min(RECONNECT_BASE_DELAY * (2 ** attempt), RECONNECT_MAX_DELAY)
+    # Add jitter to avoid thundering herd
+    jitter = random.uniform(0.1, 0.3) * delay
+    return delay + jitter
 
 def fetch_markets_and_populate_data(initial_load=True):
     """Fetch recent trades and collect distinct asset (token) IDs."""
@@ -119,9 +141,10 @@ def write_event(e):
                 print(f"Error writing event to file: {ex}")
 
 def on_message(ws, msg):
-    global start_time
+    global start_time, last_message_time
 
     try:
+        last_message_time = time.time()
         now_ms = int(time.time() * 1000)
         payload = json.loads(msg)
         events = payload if isinstance(payload, list) else [payload]
@@ -223,10 +246,25 @@ def save_and_exit(ws):
 
 def on_error(ws, error):
     print(f"WebSocket error: {error}")
+    ws_connected.clear()
+
+def on_close(ws, close_status_code, close_msg):
+    print(f"WebSocket closed: {close_status_code} - {close_msg}")
+    ws_connected.clear()
 
 def on_open(ws):
-    global start_time
-    start_time = time.time()
+    global start_time, reconnect_count, last_message_time
+    
+    if start_time is None:
+        start_time = time.time()
+    
+    last_message_time = time.time()
+    ws_connected.set()
+    
+    if reconnect_count > 0:
+        print(f"WebSocket reconnected successfully (attempt {reconnect_count})")
+    else:
+        print("WebSocket connected")
 
     if not ASSET_IDS:
         print("No asset IDs loaded. Exiting...")
@@ -240,6 +278,80 @@ def on_open(ws):
     sub = {"assets_ids": ASSET_IDS, "type": "market", "initial_dump": True}
     ws.send(json.dumps(sub))
     print(f"Subscription sent. Capturing for ~{CAPTURE_SECONDS}s...")
+    
+    # Reset reconnect count on successful connection
+    reconnect_count = 0
+
+def create_websocket():
+    """Create a new WebSocket instance with all handlers."""
+    return WebSocketApp(
+        WS_BASE,
+        on_open=on_open,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+    )
+
+def connection_monitor():
+    """Monitor connection health and trigger reconnection if needed."""
+    global last_message_time
+    
+    while not should_stop.is_set():
+        time.sleep(30)  # Check every 30 seconds
+        
+        if should_stop.is_set():
+            break
+            
+        # Check if we haven't received messages for too long
+        if last_message_time and (time.time() - last_message_time) > 120:  # 2 minutes
+            print("No messages received for 2 minutes, connection may be stale")
+            ws_connected.clear()
+        
+        # Check if capture time is exceeded
+        if start_time and (time.time() - start_time) > CAPTURE_SECONDS:
+            print(f"\nCapture time completed. Stopping...")
+            should_stop.set()
+            break
+
+def run_with_reconnection():
+    """Run WebSocket with automatic reconnection logic."""
+    global reconnect_count
+    
+    while not should_stop.is_set() and reconnect_count < MAX_RECONNECT_ATTEMPTS:
+        try:
+            ws = create_websocket()
+            
+            if reconnect_count > 0:
+                delay = calculate_reconnect_delay(reconnect_count)
+                print(f"Reconnecting in {delay:.1f} seconds (attempt {reconnect_count + 1}/{MAX_RECONNECT_ATTEMPTS})...")
+                time.sleep(delay)
+            
+            print("Starting WebSocket connection...")
+            ws.run_forever(
+                ping_interval=PING_INTERVAL,
+                ping_timeout=PING_TIMEOUT,
+                ping_payload="ping"
+            )
+            
+        except Exception as e:
+            print(f"WebSocket connection failed: {e}")
+        
+        # If we get here, the connection was lost
+        ws_connected.clear()
+        
+        if should_stop.is_set():
+            break
+            
+        reconnect_count += 1
+        
+        if reconnect_count >= MAX_RECONNECT_ATTEMPTS:
+            print(f"Maximum reconnection attempts ({MAX_RECONNECT_ATTEMPTS}) reached. Giving up.")
+            break
+        
+        print(f"Connection lost. Will attempt to reconnect...")
+    
+    # Clean shutdown
+    save_and_exit(None)
 
 if __name__ == "__main__":
     print("Capturing Polymarket L2 order book data...")
@@ -259,21 +371,21 @@ if __name__ == "__main__":
     trades_thread = threading.Thread(target=periodic_trades_fetcher, daemon=True)
     trades_thread.start()
     print(f"Started periodic trades fetcher (updates every {TRADES_UPDATE_INTERVAL}s)")
-
-    ws = WebSocketApp(
-        WS_BASE,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-    )
+    
+    # Start connection monitor thread
+    monitor_thread = threading.Thread(target=connection_monitor, daemon=True)
+    monitor_thread.start()
+    print("Started connection health monitor")
 
     try:
-        # Use built-in pings to keep the connection healthy.
-        ws.run_forever(ping_interval=20, ping_timeout=10)
+        # Run WebSocket with automatic reconnection
+        run_with_reconnection()
     except KeyboardInterrupt:
         print("\nStopping data capture...")
-        save_and_exit(ws)
+        should_stop.set()
+        save_and_exit(None)
     finally:
+        should_stop.set()
         if outfile_handle:
             try:
                 outfile_handle.close()
