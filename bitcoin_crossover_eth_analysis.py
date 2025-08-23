@@ -152,12 +152,19 @@ class CrossoverDetector:
         
         print(f"Found {len(crossovers)} Bitcoin crossover events")
         return crossovers
-    
-    def measure_eth_responses(self, crossovers: List[Dict], ethereum_df: pd.DataFrame) -> List[Dict]:
+    def measure_eth_responses(self, crossovers: List[Dict], ethereum_df: pd.DataFrame,
+                            eth_stability_threshold: float = 0.001) -> List[Dict]:
         """
         For each crossover event, measure ETH price changes at 200ms, 400ms, 600ms, 800ms, 1000ms intervals.
+        Filter out events where ETH has already changed significantly in the last second.
+        
+        Args:
+            crossovers: List of crossover events
+            ethereum_df: ETH price data
+            eth_stability_threshold: Maximum allowed ETH price change in the last 1000ms (default: 0.001 = 0.1%)
         """
         print(f"Measuring ETH responses for {len(crossovers)} crossover events...")
+        print(f"Filtering out events where ETH changed more than {eth_stability_threshold*100:.1f}% in the last 1000ms...")
         
         # Sort ethereum data by timestamp
         ethereum_df = ethereum_df.sort_values('ts_ms').copy()
@@ -169,6 +176,7 @@ class CrossoverDetector:
         
         response_intervals = [200, 400, 600, 800, 1000]  # 200ms, 400ms, 600ms, 800ms, 1000ms
         results = []
+        filtered_count = 0
         
         for crossover in crossovers:
             crossover_time = crossover['time']
@@ -180,6 +188,23 @@ class CrossoverDetector:
                 
             eth_before_idx = ethereum_df[eth_before_mask]['ts_ms'].idxmax()
             eth_price_before = ethereum_df.loc[eth_before_idx, 'mid_price']
+            
+            # Check ETH stability in the last 1000ms before crossover
+            stability_check_time = crossover_time - 1000  # 1 second ago
+            eth_stability_mask = ethereum_df['ts_ms'] <= stability_check_time
+            
+            if eth_stability_mask.any():
+                eth_stability_idx = ethereum_df[eth_stability_mask]['ts_ms'].idxmax()
+                eth_price_1s_ago = ethereum_df.loc[eth_stability_idx, 'mid_price']
+                
+                # Calculate relative price change in the last second
+                if eth_price_1s_ago > 0:
+                    eth_change_last_1s = abs(eth_price_before - eth_price_1s_ago) / eth_price_1s_ago
+                    
+                    # Filter out if ETH has changed too much in the last second
+                    if eth_change_last_1s > eth_stability_threshold:
+                        filtered_count += 1
+                        continue
             
             # Measure price changes at each interval
             interval_changes = {}
@@ -207,7 +232,9 @@ class CrossoverDetector:
                 result['eth_changes'] = interval_changes
                 results.append(result)
         
+        print(f"Filtered out {filtered_count} events where ETH was unstable in the last 1000ms")
         print(f"Successfully measured ETH responses for {len(results)} crossover events")
+        return results
         return results
 
 def analyze_crossover_results(results: List[Dict]) -> Dict:
@@ -377,6 +404,7 @@ Examples:
   python bitcoin_crossover_eth_analysis.py l1_data.jsonl
   python bitcoin_crossover_eth_analysis.py l1_data.jsonl --window 500
   python bitcoin_crossover_eth_analysis.py l1_data.jsonl --title-filter "12AM ET" --window 2000
+  python bitcoin_crossover_eth_analysis.py l1_data.jsonl --eth-stability-threshold 0.005
         '''
     )
     
@@ -391,11 +419,17 @@ Examples:
     parser.add_argument('--title-filter', '-t',
                        help='Filter markets by title containing this string')
     
+    parser.add_argument('--eth-stability-threshold', '-s',
+                       type=float,
+                       default=0.001,
+                       help='Maximum allowed ETH price change in the last 1000ms to consider stable (default: 0.001 = 0.1%%)')
+    
     args = parser.parse_args()
     
     input_file = args.input_file
     title_filter = args.title_filter
     window_ms = args.window
+    eth_stability_threshold = args.eth_stability_threshold
     
     try:
         # Load Bitcoin and Ethereum data
@@ -428,7 +462,7 @@ Examples:
             sys.exit(1)
         
         # Measure ETH responses
-        results = detector.measure_eth_responses(crossovers, ethereum_data)
+        results = detector.measure_eth_responses(crossovers, ethereum_data, eth_stability_threshold)
         
         if not results:
             print("No ETH response data could be measured!")
