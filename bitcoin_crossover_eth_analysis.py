@@ -88,6 +88,7 @@ class CrossoverDetector:
     def detect_crossovers(self, bitcoin_df: pd.DataFrame) -> List[Dict]:
         """
         Detect when Bitcoin bid reaches WINDOW ms ago's ask, or vice versa.
+        Only considers crossovers within the same market/asset to avoid inter-window correlations.
         
         Returns list of crossover events with timing and price information.
         """
@@ -105,58 +106,70 @@ class CrossoverDetector:
         
         crossovers = []
         
-        # Use a sliding window approach
-        for i in range(len(bitcoin_df)):
-            current_row = bitcoin_df.iloc[i]
-            current_time = current_row['ts_ms']
-            current_bid = current_row['best_bid_price']
-            current_ask = current_row['best_ask_price']
+        # Group by asset_id to ensure we only compare within the same market
+        for asset_id, asset_group in bitcoin_df.groupby('asset_id'):
+            asset_group = asset_group.sort_values('ts_ms').copy()
             
-            # Find data from WINDOW ms ago
-            window_start_time = current_time - self.window_ms
-            
-            # Get the closest record to window_start_time
-            time_diffs = abs(bitcoin_df['ts_ms'] - window_start_time)
-            closest_idx = time_diffs.idxmin()
-            
-            # Only consider if the closest record is reasonably close to our target time
-            if time_diffs[closest_idx] > self.window_ms * 0.5:  # Allow 50% tolerance
+            if len(asset_group) < 2:
                 continue
                 
-            window_row = bitcoin_df.loc[closest_idx]
-            window_bid = window_row['best_bid_price']
-            window_ask = window_row['best_ask_price']
-            
-            # Check for crossovers
-            # Type 1: Current bid >= window ask (bid crosses up through ask)
-            if current_bid >= window_ask:
-                crossovers.append({
-                    'type': 'bid_crosses_ask',
-                    'time': current_time,
-                    'datetime': current_row['datetime'],
-                    'current_bid': current_bid,
-                    'current_ask': current_ask,
-                    'window_bid': window_bid,
-                    'window_ask': window_ask,
-                    'crossover_amount': current_bid - window_ask,
-                    'asset_id': current_row['asset_id'],
-                    'market_title': current_row['market_title']
-                })
-            
-            # Type 2: Current ask <= window bid (ask crosses down through bid)  
-            if current_ask <= window_bid:
-                crossovers.append({
-                    'type': 'ask_crosses_bid',
-                    'time': current_time,
-                    'datetime': current_row['datetime'],
-                    'current_bid': current_bid,
-                    'current_ask': current_ask,
-                    'window_bid': window_bid,
-                    'window_ask': window_ask,
-                    'crossover_amount': window_bid - current_ask,
-                    'asset_id': current_row['asset_id'],
-                    'market_title': current_row['market_title']
-                })
+            # Use a sliding window approach within each asset
+            for i in range(len(asset_group)):
+                current_row = asset_group.iloc[i]
+                current_time = current_row['ts_ms']
+                current_bid = current_row['best_bid_price']
+                current_ask = current_row['best_ask_price']
+                
+                # Find data from WINDOW ms ago within the same asset
+                window_start_time = current_time - self.window_ms
+                
+                # Only look at records from the same asset that are before current time
+                past_records = asset_group[asset_group['ts_ms'] <= window_start_time]
+                if len(past_records) == 0:
+                    continue
+                
+                # Get the closest record to window_start_time within the same asset
+                time_diffs = abs(past_records['ts_ms'] - window_start_time)
+                closest_idx = time_diffs.idxmin()
+                
+                # Only consider if the closest record is reasonably close to our target time
+                if time_diffs[closest_idx] > self.window_ms * 0.5:  # Allow 50% tolerance
+                    continue
+                    
+                window_row = past_records.loc[closest_idx]
+                window_bid = window_row['best_bid_price']
+                window_ask = window_row['best_ask_price']
+                
+                # Check for crossovers
+                # Type 1: Current bid >= window ask (bid crosses up through ask)
+                if current_bid >= window_ask:
+                    crossovers.append({
+                        'type': 'bid_crosses_ask',
+                        'time': current_time,
+                        'datetime': current_row['datetime'],
+                        'current_bid': current_bid,
+                        'current_ask': current_ask,
+                        'window_bid': window_bid,
+                        'window_ask': window_ask,
+                        'crossover_amount': current_bid - window_ask,
+                        'asset_id': current_row['asset_id'],
+                        'market_title': current_row['market_title']
+                    })
+                
+                # Type 2: Current ask <= window bid (ask crosses down through bid)
+                if current_ask <= window_bid:
+                    crossovers.append({
+                        'type': 'ask_crosses_bid',
+                        'time': current_time,
+                        'datetime': current_row['datetime'],
+                        'current_bid': current_bid,
+                        'current_ask': current_ask,
+                        'window_bid': window_bid,
+                        'window_ask': window_ask,
+                        'crossover_amount': window_bid - current_ask,
+                        'asset_id': current_row['asset_id'],
+                        'market_title': current_row['market_title']
+                    })
         
         print(f"Found {len(crossovers)} Bitcoin crossover events")
         return crossovers
@@ -199,27 +212,52 @@ class CrossoverDetector:
             for crypto_name, crypto_df in crypto_dfs.items():
                 if crypto_df.empty:
                     continue
+                
+                # Get the most active asset for this crypto at this time
+                # Find records around the crossover time to determine active asset
+                time_window = crypto_df[
+                    (crypto_df['ts_ms'] >= crossover_time - 60000) &  # 1 minute before
+                    (crypto_df['ts_ms'] <= crossover_time + 60000)    # 1 minute after
+                ]
+                
+                if time_window.empty:
+                    continue
+                
+                # Get the most active asset in this time window
+                active_asset = time_window['asset_id'].value_counts().index[0]
+                crypto_asset_df = crypto_df[crypto_df['asset_id'] == active_asset].copy()
+                
+                if crypto_asset_df.empty:
+                    continue
                     
-                # Find crypto price at crossover time (or closest before)
-                crypto_before_mask = crypto_df['ts_ms'] <= crossover_time
+                # Find crypto price at crossover time (or closest before) within same asset
+                crypto_before_mask = crypto_asset_df['ts_ms'] <= crossover_time
                 if not crypto_before_mask.any():
                     continue
                     
-                crypto_before_idx = crypto_df[crypto_before_mask]['ts_ms'].idxmax()
-                crypto_price_before = crypto_df.loc[crypto_before_idx, 'mid_price']
-                crypto_prices_before[crypto_name] = crypto_price_before
+                crypto_before_idx = crypto_asset_df[crypto_before_mask]['ts_ms'].idxmax()
+                crypto_price_before = crypto_asset_df.loc[crypto_before_idx, 'mid_price']
                 
-                # Check stability in the last 1000ms before crossover
+                if pd.isna(crypto_price_before):
+                    continue
+                    
+                crypto_prices_before[crypto_name] = {
+                    'price': crypto_price_before,
+                    'asset_id': active_asset,
+                    'df': crypto_asset_df
+                }
+                
+                # Check stability in the last 1000ms before crossover within same asset
                 stability_check_time = crossover_time - 1000  # 1 second ago
-                crypto_stability_mask = crypto_df['ts_ms'] <= stability_check_time
+                crypto_stability_mask = crypto_asset_df['ts_ms'] <= stability_check_time
                 
                 is_stable = True
                 if crypto_stability_mask.any():
-                    crypto_stability_idx = crypto_df[crypto_stability_mask]['ts_ms'].idxmax()
-                    crypto_price_1s_ago = crypto_df.loc[crypto_stability_idx, 'mid_price']
+                    crypto_stability_idx = crypto_asset_df[crypto_stability_mask]['ts_ms'].idxmax()
+                    crypto_price_1s_ago = crypto_asset_df.loc[crypto_stability_idx, 'mid_price']
                     
                     # Calculate relative price change in the last second
-                    if crypto_price_1s_ago > 0:
+                    if not pd.isna(crypto_price_1s_ago) and crypto_price_1s_ago > 0:
                         crypto_change_last_1s = abs(crypto_price_before - crypto_price_1s_ago) / crypto_price_1s_ago
                         
                         # Mark as unstable if this crypto has changed too much in the last second
@@ -243,26 +281,30 @@ class CrossoverDetector:
                 
                 # Collect changes only from stable cryptos for this interval
                 for crypto_name in stable_cryptos:
-                    crypto_df = crypto_dfs[crypto_name]
-                    if crypto_df.empty or crypto_name not in crypto_prices_before:
+                    if crypto_name not in crypto_prices_before:
                         continue
-                        
-                    crypto_price_before = crypto_prices_before[crypto_name]
                     
-                    # Find closest crypto price at target time
-                    time_diffs = abs(crypto_df['ts_ms'] - target_time)
-                    if len(time_diffs) == 0:
+                    crypto_info = crypto_prices_before[crypto_name]
+                    crypto_price_before = crypto_info['price']
+                    crypto_asset_df = crypto_info['df']
+                    
+                    # Find closest crypto price at target time within the same asset
+                    target_records = crypto_asset_df[crypto_asset_df['ts_ms'] <= target_time + interval_ms * 0.5]
+                    target_records = target_records[target_records['ts_ms'] >= target_time - interval_ms * 0.5]
+                    
+                    if target_records.empty:
                         continue
-                        
+                    
+                    # Get the record closest to target time
+                    time_diffs = abs(target_records['ts_ms'] - target_time)
                     closest_idx = time_diffs.idxmin()
                     
-                    # Only use if reasonably close to target time (within 50% of interval)
-                    if time_diffs[closest_idx] <= interval_ms * 0.5:
-                        crypto_price_after = crypto_df.loc[closest_idx, 'mid_price']
-                        # Calculate relative price change (percentage)
-                        if crypto_price_before > 0:
-                            relative_change = (crypto_price_after - crypto_price_before) / crypto_price_before
-                            interval_changes.append(relative_change)
+                    crypto_price_after = target_records.loc[closest_idx, 'mid_price']
+                    
+                    # Calculate relative price change (percentage)
+                    if not pd.isna(crypto_price_after) and crypto_price_before > 0:
+                        relative_change = (crypto_price_after - crypto_price_before) / crypto_price_before
+                        interval_changes.append(relative_change)
                 
                 # Average the changes across stable cryptos for this interval
                 if interval_changes:
@@ -271,7 +313,9 @@ class CrossoverDetector:
             # Only include if we have at least some interval measurements
             if combined_interval_changes:
                 result = crossover.copy()
-                result['crypto_prices_before'] = crypto_prices_before
+                # Store simplified version of crypto prices for result
+                simplified_prices = {name: info['price'] for name, info in crypto_prices_before.items()}
+                result['crypto_prices_before'] = simplified_prices
                 result['combined_changes'] = combined_interval_changes
                 result['stable_cryptos'] = list(stable_cryptos)  # Track which cryptos were stable
                 results.append(result)
@@ -441,7 +485,7 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Bitcoin Crossover Crypto Analysis - Detects when Bitcoin bid reaches WINDOW ms ago\'s ask (or vice versa) and measures combined ETH/XRP/Solana price changes.',
+        description='Bitcoin Crossover Crypto Prediction Market Analysis - Detects when Bitcoin prediction market bid reaches WINDOW ms ago\'s ask (or vice versa) and measures combined ETH/XRP/Solana prediction market price changes. Ensures intra-market analysis only.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
