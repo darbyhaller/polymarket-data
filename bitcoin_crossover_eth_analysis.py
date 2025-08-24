@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Bitcoin Crossover ETH Analysis.
-Detects when Bitcoin bid reaches WINDOW ms ago's ask (or vice versa) and measures ETH price changes.
+Bitcoin Crossover Multi-Crypto Analysis.
+Detects when Bitcoin bid reaches WINDOW ms ago's ask (or vice versa) and measures crypto price changes.
 """
 
 import json
@@ -14,16 +14,44 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 from collections import deque
 
-def load_crypto_data(filename: str, title_filter: str = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load Bitcoin, Ethereum, Solana, and XRP L1 data with optional filtering."""
+# ============================================================================
+# CONFIGURATION - Modify these lists to change which cryptos to analyze
+# ============================================================================
+
+# Independent variables (cryptos that trigger crossover events)
+INDEPENDENT_CRYPTOS = ['bitcoin']
+
+# Dependent variables (cryptos whose responses we measure)
+DEPENDENT_CRYPTOS = ['ethereum', 'solana', 'xrp']
+
+# Color mapping for each crypto (used in plots)
+CRYPTO_COLORS = {
+    'bitcoin': 'red',
+    'ethereum': 'blue',
+    'solana': 'purple',
+    'xrp': 'orange'
+}
+
+# Short names for display (maps full name to abbreviation)
+CRYPTO_SHORT_NAMES = {
+    'bitcoin': 'BTC',
+    'ethereum': 'ETH',
+    'solana': 'SOL',
+    'xrp': 'XRP'
+}
+
+# ============================================================================
+
+def load_crypto_data(filename: str, title_filter: str = None) -> Dict[str, pd.DataFrame]:
+    """Load crypto L1 data for all configured cryptos with optional filtering."""
+    all_cryptos = INDEPENDENT_CRYPTOS + DEPENDENT_CRYPTOS
     print(f"Loading crypto data from {filename}...")
+    print(f"Looking for: {', '.join(all_cryptos)}")
     if title_filter:
         print(f"Filtering for markets containing: '{title_filter}'")
     
-    bitcoin_data = []
-    ethereum_data = []
-    solana_data = []
-    xrp_data = []
+    # Initialize data containers for each crypto
+    crypto_data = {crypto: [] for crypto in all_cryptos}
     
     with open(filename, 'r') as f:
         for line_num, line in enumerate(f, 1):
@@ -41,14 +69,10 @@ def load_crypto_data(filename: str, title_filter: str = None) -> Tuple[pd.DataFr
                     continue
                 
                 # Separate crypto data by type
-                if 'bitcoin' in market_title:
-                    bitcoin_data.append(record)
-                elif 'ethereum' in market_title:
-                    ethereum_data.append(record)
-                elif 'solana' in market_title:
-                    solana_data.append(record)
-                elif 'xrp' in market_title:
-                    xrp_data.append(record)
+                for crypto in all_cryptos:
+                    if crypto in market_title:
+                        crypto_data[crypto].append(record)
+                        break  # Only assign to first matching crypto
                 
                 if line_num % 10000 == 0:
                     print(f"Processed {line_num} records...")
@@ -60,23 +84,24 @@ def load_crypto_data(filename: str, title_filter: str = None) -> Tuple[pd.DataFr
                 print(f"Error processing line {line_num}: {e}")
                 continue
     
-    print(f"Loaded {len(bitcoin_data)} Bitcoin records, {len(ethereum_data)} Ethereum records, {len(solana_data)} Solana records, {len(xrp_data)} XRP records")
+    # Print loaded record counts
+    for crypto in all_cryptos:
+        count = len(crypto_data[crypto])
+        print(f"Loaded {count} {crypto.title()} records")
     
     # Convert to DataFrames
-    bitcoin_df = pd.DataFrame(bitcoin_data) if bitcoin_data else pd.DataFrame()
-    ethereum_df = pd.DataFrame(ethereum_data) if ethereum_data else pd.DataFrame()
-    solana_df = pd.DataFrame(solana_data) if solana_data else pd.DataFrame()
-    xrp_df = pd.DataFrame(xrp_data) if xrp_data else pd.DataFrame()
-    
-    for df in [bitcoin_df, ethereum_df, solana_df, xrp_df]:
+    crypto_dfs = {}
+    for crypto in all_cryptos:
+        df = pd.DataFrame(crypto_data[crypto]) if crypto_data[crypto] else pd.DataFrame()
         if not df.empty:
             df['datetime'] = pd.to_datetime(df['ts_ms'], unit='ms')
             # Convert price columns to numeric
             for col in ['best_bid_price', 'best_ask_price', 'mid_price']:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
+        crypto_dfs[crypto] = df
     
-    return bitcoin_df, ethereum_df, solana_df, xrp_df
+    return crypto_dfs
 
 class CrossoverDetector:
     """Detects Bitcoin bid/ask crossovers and measures responses from multiple dependent variables."""
@@ -329,17 +354,28 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
         print("No data to plot")
         return None
     
-    crypto_names = analysis.get('crypto_names', ['ETH'])
+    crypto_names = analysis.get('crypto_names', [])
     intervals = analysis['intervals']
     
-    # Create 6 plots: 2 for each cryptocurrency (bid crosses ask, ask crosses bid)
-    fig, axes = plt.subplots(3, 2, figsize=(16, 18))
+    if not crypto_names:
+        print("No crypto names found in analysis")
+        return None
     
-    colors = {'ETH': 'blue', 'SOL': 'purple', 'XRP': 'orange'}
+    # Calculate grid size based on number of cryptos (2 plots per crypto)
+    num_plots = len(crypto_names) * 2
+    rows = (num_plots + 1) // 2  # Round up division
+    cols = 2
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(16, 6 * rows))
+    
+    # Ensure axes is always 2D for consistent indexing
+    if rows == 1:
+        axes = axes.reshape(1, -1)
     
     plot_idx = 0
     for crypto_name in crypto_names:
-        crypto_color = colors.get(crypto_name, 'gray')
+        # Get color from configuration, fallback to gray
+        crypto_color = CRYPTO_COLORS.get(crypto_name.lower(), 'gray')
         
         # Plot for bid crosses ask
         ax_bid = axes[plot_idx // 2, plot_idx % 2]
@@ -354,11 +390,15 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
             stds = [bid_data.get(interval, {}).get('std', 0) for interval in intervals]
             
             ax_bid.bar(intervals, means, yerr=stds, alpha=0.7, color=crypto_color, capsize=5)
-            ax_bid.set_title(f'{crypto_name} Response to Bitcoin Bid Crossing Ask\n({analysis["bid_crosses_ask"]["count"]} events)')
+            
+            # Get independent crypto name for title
+            independent_crypto = CRYPTO_SHORT_NAMES.get(INDEPENDENT_CRYPTOS[0], INDEPENDENT_CRYPTOS[0].upper())
+            ax_bid.set_title(f'{crypto_name} Response to {independent_crypto} Bid Crossing Ask\n({analysis["bid_crosses_ask"]["count"]} events)')
         else:
             ax_bid.text(0.5, 0.5, f'No bid crosses ask events\nfor {crypto_name}',
                        ha='center', va='center', transform=ax_bid.transAxes)
-            ax_bid.set_title(f'{crypto_name} Response to Bitcoin Bid Crossing Ask')
+            independent_crypto = CRYPTO_SHORT_NAMES.get(INDEPENDENT_CRYPTOS[0], INDEPENDENT_CRYPTOS[0].upper())
+            ax_bid.set_title(f'{crypto_name} Response to {independent_crypto} Bid Crossing Ask')
         
         ax_bid.set_ylabel(f'Average {crypto_name} Price Change')
         ax_bid.set_xlabel('Time Interval')
@@ -380,11 +420,15 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
             stds = [ask_data.get(interval, {}).get('std', 0) for interval in intervals]
             
             ax_ask.bar(intervals, means, yerr=stds, alpha=0.7, color=crypto_color, capsize=5)
-            ax_ask.set_title(f'{crypto_name} Response to Bitcoin Ask Crossing Bid\n({analysis["ask_crosses_bid"]["count"]} events)')
+            
+            # Get independent crypto name for title
+            independent_crypto = CRYPTO_SHORT_NAMES.get(INDEPENDENT_CRYPTOS[0], INDEPENDENT_CRYPTOS[0].upper())
+            ax_ask.set_title(f'{crypto_name} Response to {independent_crypto} Ask Crossing Bid\n({analysis["ask_crosses_bid"]["count"]} events)')
         else:
             ax_ask.text(0.5, 0.5, f'No ask crosses bid events\nfor {crypto_name}',
                        ha='center', va='center', transform=ax_ask.transAxes)
-            ax_ask.set_title(f'{crypto_name} Response to Bitcoin Ask Crossing Bid')
+            independent_crypto = CRYPTO_SHORT_NAMES.get(INDEPENDENT_CRYPTOS[0], INDEPENDENT_CRYPTOS[0].upper())
+            ax_ask.set_title(f'{crypto_name} Response to {independent_crypto} Ask Crossing Bid')
         
         ax_ask.set_ylabel(f'Average {crypto_name} Price Change')
         ax_ask.set_xlabel('Time Interval')
@@ -392,6 +436,10 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
         ax_ask.axhline(y=0, color='black', linestyle='-', alpha=0.5)
         
         plot_idx += 1
+    
+    # Hide any unused subplots
+    for i in range(plot_idx, rows * cols):
+        axes[i // cols, i % cols].set_visible(False)
     
     plt.tight_layout()
     
@@ -419,99 +467,93 @@ def extract_time_period(market_title: str) -> Optional[str]:
     
     return None
 
-def find_matching_markets(bitcoin_df: pd.DataFrame, ethereum_df: pd.DataFrame,
-                         solana_df: pd.DataFrame, xrp_df: pd.DataFrame) -> List[Dict]:
+def find_matching_markets(crypto_dfs: Dict[str, pd.DataFrame]) -> List[Dict]:
     """
-    Find Bitcoin markets and their corresponding ETH, SOL, XRP markets with matching time periods.
+    Find independent crypto markets and their corresponding dependent crypto markets with matching time periods.
     Returns list of market groups with matching time periods.
     """
-    print("Finding Bitcoin markets with matching ETH, SOL, XRP markets...")
+    independent_crypto = INDEPENDENT_CRYPTOS[0]  # Use first independent crypto
+    independent_short = CRYPTO_SHORT_NAMES.get(independent_crypto, independent_crypto.upper())
     
-    # Get all unique Bitcoin markets that match "Up or Down" pattern
-    bitcoin_markets = []
-    for _, row in bitcoin_df.iterrows():
+    dependent_shorts = [CRYPTO_SHORT_NAMES.get(crypto, crypto.upper()) for crypto in DEPENDENT_CRYPTOS]
+    print(f"Finding {independent_short} markets with matching {', '.join(dependent_shorts)} markets...")
+    
+    independent_df = crypto_dfs.get(independent_crypto, pd.DataFrame())
+    if independent_df.empty:
+        print(f"No {independent_crypto} data available")
+        return []
+    
+    # Get all unique independent crypto markets that match "Up or Down" pattern
+    independent_markets = []
+    for _, row in independent_df.iterrows():
         title = row['market_title']
         if 'up or down' in title.lower() and 'august' in title.lower():
             time_period = extract_time_period(title)
             if time_period:
-                bitcoin_markets.append({
+                independent_markets.append({
                     'asset_id': row['asset_id'],
                     'title': title,
                     'time_period': time_period
                 })
     
     # Remove duplicates based on asset_id
-    bitcoin_markets = {m['asset_id']: m for m in bitcoin_markets}.values()
-    bitcoin_markets = list(bitcoin_markets)
+    independent_markets = {m['asset_id']: m for m in independent_markets}.values()
+    independent_markets = list(independent_markets)
     
-    print(f"Found {len(bitcoin_markets)} Bitcoin 'Up or Down' markets")
+    print(f"Found {len(independent_markets)} {independent_short} 'Up or Down' markets")
     
-    # For each Bitcoin market, find matching ETH, SOL, XRP markets
+    # For each independent market, find matching dependent markets
     market_groups = []
     
-    for btc_market in bitcoin_markets:
-        time_period = btc_market['time_period']
-        print(f"\nLooking for matches for Bitcoin market: {btc_market['title']}")
+    for indep_market in independent_markets:
+        time_period = indep_market['time_period']
+        print(f"\nLooking for matches for {independent_short} market: {indep_market['title']}")
         print(f"Time period: {time_period}")
         
         group = {
             'time_period': time_period,
-            'bitcoin': btc_market,
+            independent_crypto: indep_market,
             'matches': {}
         }
         
-        # Find matching ETH market
-        for _, row in ethereum_df.iterrows():
-            title = row['market_title']
-            if ('up or down' in title.lower() and
-                'ethereum' in title.lower() and
-                time_period in title):
-                group['matches']['ETH'] = {
-                    'asset_id': row['asset_id'],
-                    'title': title
-                }
-                print(f"  Found ETH match: {title}")
-                break
-        
-        # Find matching SOL market
-        for _, row in solana_df.iterrows():
-            title = row['market_title']
-            if ('up or down' in title.lower() and
-                'solana' in title.lower() and
-                time_period in title):
-                group['matches']['SOL'] = {
-                    'asset_id': row['asset_id'],
-                    'title': title
-                }
-                print(f"  Found SOL match: {title}")
-                break
-        
-        # Find matching XRP market
-        for _, row in xrp_df.iterrows():
-            title = row['market_title']
-            if ('up or down' in title.lower() and
-                'xrp' in title.lower() and
-                time_period in title):
-                group['matches']['XRP'] = {
-                    'asset_id': row['asset_id'],
-                    'title': title
-                }
-                print(f"  Found XRP match: {title}")
-                break
+        # Find matching dependent markets
+        for dependent_crypto in DEPENDENT_CRYPTOS:
+            dependent_df = crypto_dfs.get(dependent_crypto, pd.DataFrame())
+            if dependent_df.empty:
+                continue
+                
+            dependent_short = CRYPTO_SHORT_NAMES.get(dependent_crypto, dependent_crypto.upper())
+            
+            for _, row in dependent_df.iterrows():
+                title = row['market_title']
+                if ('up or down' in title.lower() and
+                    dependent_crypto in title.lower() and
+                    time_period in title):
+                    group['matches'][dependent_short] = {
+                        'asset_id': row['asset_id'],
+                        'title': title,
+                        'crypto_name': dependent_crypto
+                    }
+                    print(f"  Found {dependent_short} match: {title}")
+                    break
         
         # Only include groups that have at least one match
         if group['matches']:
             market_groups.append(group)
             print(f"  Added group with {len(group['matches'])} matches")
         else:
-            print(f"  No matches found for this Bitcoin market")
+            print(f"  No matches found for this {independent_short} market")
     
-    print(f"\nFound {len(market_groups)} Bitcoin markets with at least one matching crypto market")
+    print(f"\nFound {len(market_groups)} {independent_short} markets with at least one matching crypto market")
     return market_groups
 
 def main():
+    independent_crypto = INDEPENDENT_CRYPTOS[0]
+    independent_short = CRYPTO_SHORT_NAMES.get(independent_crypto, independent_crypto.upper())
+    dependent_shorts = [CRYPTO_SHORT_NAMES.get(crypto, crypto.upper()) for crypto in DEPENDENT_CRYPTOS]
+    
     parser = argparse.ArgumentParser(
-        description='Bitcoin Crossover Multi-Crypto Analysis - Detects when Bitcoin bid reaches WINDOW ms ago\'s ask (or vice versa) and measures ETH, SOL, and XRP price changes.',
+        description=f'{independent_short} Crossover Multi-Crypto Analysis - Detects when {independent_short} bid reaches WINDOW ms ago\'s ask (or vice versa) and measures {", ".join(dependent_shorts)} price changes.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
@@ -546,18 +588,18 @@ Examples:
     stability_threshold = args.stability_threshold
     
     try:
-        # Load Bitcoin, Ethereum, Solana, and XRP data
-        bitcoin_df, ethereum_df, solana_df, xrp_df = load_crypto_data(input_file, title_filter)
+        # Load all configured crypto data
+        crypto_dfs = load_crypto_data(input_file, title_filter)
         
-        if bitcoin_df.empty:
-            print("Need Bitcoin data for crossover detection!")
+        if crypto_dfs.get(independent_crypto, pd.DataFrame()).empty:
+            print(f"Need {independent_crypto} data for crossover detection!")
             sys.exit(1)
         
         # Find matching markets by time period
-        market_groups = find_matching_markets(bitcoin_df, ethereum_df, solana_df, xrp_df)
+        market_groups = find_matching_markets(crypto_dfs)
         
         if not market_groups:
-            print("No Bitcoin markets with matching ETH/SOL/XRP markets found!")
+            print(f"No {independent_short} markets with matching dependent crypto markets found!")
             sys.exit(1)
         
         # Process each market group
@@ -569,50 +611,35 @@ Examples:
             print(f"PROCESSING MARKET GROUP: {group['time_period']}")
             print(f"="*80)
             
-            # Get Bitcoin data for this group
-            bitcoin_asset_id = group['bitcoin']['asset_id']
-            bitcoin_data = bitcoin_df[bitcoin_df['asset_id'] == bitcoin_asset_id].copy()
+            # Get independent crypto data for this group
+            independent_asset_id = group[independent_crypto]['asset_id']
+            independent_data = crypto_dfs[independent_crypto][crypto_dfs[independent_crypto]['asset_id'] == independent_asset_id].copy()
             
-            if bitcoin_data.empty:
-                print(f"No Bitcoin data found for asset {bitcoin_asset_id}")
+            if independent_data.empty:
+                print(f"No {independent_crypto} data found for asset {independent_asset_id}")
                 continue
             
             # Prepare dependent variable data for this group
-            crypto_dfs = {}
+            group_crypto_dfs = {}
             crypto_names = []
             
-            for crypto_name, match_info in group['matches'].items():
-                if crypto_name == 'ETH' and not ethereum_df.empty:
+            for crypto_short, match_info in group['matches'].items():
+                crypto_name = match_info['crypto_name']
+                if crypto_name in DEPENDENT_CRYPTOS and not crypto_dfs.get(crypto_name, pd.DataFrame()).empty:
                     crypto_asset_id = match_info['asset_id']
-                    crypto_data = ethereum_df[ethereum_df['asset_id'] == crypto_asset_id].copy()
+                    crypto_data = crypto_dfs[crypto_name][crypto_dfs[crypto_name]['asset_id'] == crypto_asset_id].copy()
                     if not crypto_data.empty:
-                        crypto_dfs['ETH'] = crypto_data
-                        crypto_names.append('ETH')
-                        all_crypto_names.add('ETH')
-                
-                elif crypto_name == 'SOL' and not solana_df.empty:
-                    crypto_asset_id = match_info['asset_id']
-                    crypto_data = solana_df[solana_df['asset_id'] == crypto_asset_id].copy()
-                    if not crypto_data.empty:
-                        crypto_dfs['SOL'] = crypto_data
-                        crypto_names.append('SOL')
-                        all_crypto_names.add('SOL')
-                
-                elif crypto_name == 'XRP' and not xrp_df.empty:
-                    crypto_asset_id = match_info['asset_id']
-                    crypto_data = xrp_df[xrp_df['asset_id'] == crypto_asset_id].copy()
-                    if not crypto_data.empty:
-                        crypto_dfs['XRP'] = crypto_data
-                        crypto_names.append('XRP')
-                        all_crypto_names.add('XRP')
+                        group_crypto_dfs[crypto_short] = crypto_data
+                        crypto_names.append(crypto_short)
+                        all_crypto_names.add(crypto_short)
             
-            if not crypto_dfs:
+            if not group_crypto_dfs:
                 print(f"No matching crypto data found for this group")
                 continue
             
             print(f"\nAnalyzing:")
-            print(f"Bitcoin: {bitcoin_data['market_title'].iloc[0]} ({len(bitcoin_data)} points)")
-            for name, df in crypto_dfs.items():
+            print(f"{independent_short}: {independent_data['market_title'].iloc[0]} ({len(independent_data)} points)")
+            for name, df in group_crypto_dfs.items():
                 print(f"{name}: {df['market_title'].iloc[0]} ({len(df)} points)")
             print(f"Window: {window_ms}ms")
             
@@ -620,14 +647,14 @@ Examples:
             detector = CrossoverDetector(window_ms=window_ms)
             
             # Detect crossovers
-            crossovers = detector.detect_crossovers(bitcoin_data)
+            crossovers = detector.detect_crossovers(independent_data)
             
             if not crossovers:
                 print("No crossover events found for this group!")
                 continue
             
             # Measure crypto responses
-            results = detector.measure_crypto_responses(crossovers, crypto_dfs, stability_threshold)
+            results = detector.measure_crypto_responses(crossovers, group_crypto_dfs, stability_threshold)
             
             if not results:
                 print("No crypto response data could be measured for this group!")
@@ -636,7 +663,7 @@ Examples:
             # Add group info to results
             for result in results:
                 result['market_group'] = group['time_period']
-                result['bitcoin_title'] = group['bitcoin']['title']
+                result[f'{independent_crypto}_title'] = group[independent_crypto]['title']
             
             all_results.extend(results)
         
@@ -654,13 +681,13 @@ Examples:
             filter_suffix += f"_filtered_{title_filter.replace(' ', '_')}"
         
         crypto_suffix = "_".join(all_crypto_names)
-        output_file = f"bitcoin_crossover_{crypto_suffix.lower()}_analysis{filter_suffix}_w{window_ms}ms.png"
+        output_file = f"{independent_crypto}_crossover_{crypto_suffix.lower()}_analysis{filter_suffix}_w{window_ms}ms.png"
         
         fig = create_analysis_plot(analysis, output_file=output_file)
         
         # Print detailed results
         print(f"\n" + "="*70)
-        print(f"BITCOIN CROSSOVER → MULTI-CRYPTO RESPONSE ANALYSIS")
+        print(f"{independent_short} CROSSOVER → MULTI-CRYPTO RESPONSE ANALYSIS")
         print(f"="*70)
         print(f"Analyzed {len(market_groups)} market groups with matching time periods")
         print(f"Total events across all groups: {len(all_results)}")
