@@ -4,6 +4,7 @@ import requests
 import websocket  # pip install websocket-client
 from threading import Lock, Event
 from datetime import datetime
+from collections import deque
 from fetch_markets import get_tradeable_asset_mappings
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -21,6 +22,40 @@ STALL_TIMEOUT = 90
 BACKOFF_MIN = 1.0
 BACKOFF_MAX = 20.0
 
+class BoundedHashCache:
+    """LRU cache for hash deduplication with bounded memory usage."""
+    
+    def __init__(self, max_size=1_000_000):
+        self.max_size = max_size
+        self.cache_set = set()
+        self.cache_queue = deque()
+        self.lock = Lock()
+    
+    def contains(self, hash_value):
+        """Check if hash exists in cache."""
+        with self.lock:
+            return hash_value in self.cache_set
+    
+    def add(self, hash_value):
+        """Add hash to cache, evicting oldest if at capacity."""
+        with self.lock:
+            if hash_value in self.cache_set:
+                return  # Already exists
+            
+            # Add new hash
+            self.cache_set.add(hash_value)
+            self.cache_queue.append(hash_value)
+            
+            # Evict oldest if over capacity
+            while len(self.cache_queue) > self.max_size:
+                oldest = self.cache_queue.popleft()
+                self.cache_set.discard(oldest)
+    
+    def size(self):
+        """Get current cache size."""
+        with self.lock:
+            return len(self.cache_set)
+
 # state
 data_lock = Lock()
 file_lock = Lock()
@@ -31,7 +66,7 @@ previous_allowed_asset_ids = set()
 asset_to_market = {}
 asset_outcome = {}
 market_to_first_asset = {}
-seen_hashes = set()
+seen_hashes = BoundedHashCache(max_size=1000000)  # Bounded LRU cache instead of unbounded set
 
 subscribed_asset_ids = set()
 subs_version = 0
@@ -211,7 +246,7 @@ def on_message(ws, msg):
                     continue
                 h = d.get("hash")
                 if h:
-                    if h in seen_hashes:
+                    if seen_hashes.contains(h):
                         continue
                     seen_hashes.add(h)
                 title = asset_to_market.get(aid, "")
