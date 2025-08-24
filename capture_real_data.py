@@ -16,7 +16,7 @@ OUTFILE = "orderbook_clip.jsonl"
 
 ASSET_IDS = []
 start_time = None
-CAPTURE_SECONDS = 3600 * 8  # adjust as needed
+CAPTURE_SECONDS = 3600 * 24 * 7 * 52  # adjust as needed
 TRADES_UPDATE_INTERVAL = 10  # seconds between trades API calls
 
 # WebSocket reconnection settings
@@ -356,10 +356,10 @@ def run_with_reconnection():
 if __name__ == "__main__":
     print("Capturing Polymarket L2 order book data...")
     
-    # Open file for live writing
+    # Open file for live writing (append mode to preserve existing data)
     try:
-        outfile_handle = open(OUTFILE, "w")
-        print(f"Opened {OUTFILE} for live writing")
+        outfile_handle = open(OUTFILE, "a")
+        print(f"Opened {OUTFILE} for live writing (append mode)")
     except Exception as e:
         print(f"Error opening output file: {e}")
         exit(1)
