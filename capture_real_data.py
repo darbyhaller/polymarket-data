@@ -19,8 +19,8 @@ CLOB_BASE = "https://clob.polymarket.com"
 # OUTFILE = "/data/polybook/orderbook_clip.jsonl"      # adjust if needed
 OUTFILE = "./orderbook_clip.jsonl"      # adjust if needed
 MARKETS_UPDATE_INTERVAL = 10                          # seconds (catch new markets quickly)
-PING_INTERVAL = 15
-PING_TIMEOUT = 5
+PING_INTERVAL = 30                                    # Increased from 15 to reduce ping frequency
+PING_TIMEOUT = 10                                     # Increased from 5 to allow more time for pong
 FSYNC_EVERY_SEC = 1.0
 
 # state
@@ -317,7 +317,9 @@ def main():
         reconnect=5,                 # seconds between reconnect attempts
         ping_interval=PING_INTERVAL,
         ping_timeout=PING_TIMEOUT,
-        ping_payload="ping"
+        ping_payload="ping",
+        skip_utf8_validation=True,   # Skip UTF-8 validation for better performance
+        suppress_origin=True         # Suppress origin header
     )
     rel.dispatch()  # blocks until aborted by signal
 
