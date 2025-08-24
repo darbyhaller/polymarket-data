@@ -121,7 +121,8 @@ def fetch_markets_and_populate_data(initial=False):
 
 def markets_poll_loop():
     while not should_stop.is_set():
-        time.sleep(MARKETS_UPDATE_INTERVAL)
+        if should_stop.wait(MARKETS_UPDATE_INTERVAL):
+            break
         fetch_markets_and_populate_data(initial=False)
 
 def send_subscription(ws):
@@ -261,7 +262,8 @@ def subs_refresher(ws):
     """Resubscribe if markets thread changed allowed_asset_ids."""
     global sent_version
     while not should_stop.is_set():
-        time.sleep(15)
+        if should_stop.wait(15):
+            break
         with ws_lock:
             v = subs_version
         if v != sent_version:
@@ -281,7 +283,13 @@ def subs_refresher(ws):
 def watchdog(ws):
     """Force-close the socket if we haven't seen traffic for STALL_TIMEOUT seconds."""
     while not should_stop.is_set() and getattr(ws, "sock", None) and ws.keep_running:
-        time.sleep(5)
+        if should_stop.wait(5):
+            # Stop signal received, force close the websocket
+            try:
+                ws.close()
+            except:
+                pass
+            break
         if time.time() - last_message_time > STALL_TIMEOUT:
             print(f"No data for {STALL_TIMEOUT}s — forcing reconnect")
             try:
@@ -294,7 +302,11 @@ def handle_signal(signum, frame):
     print(f"Signal {signum}: stopping")
     should_stop.set()
     fs_close()
-    # Let run_forever return naturally; main() will exit.
+    # Force exit if signal handler is called multiple times
+    if hasattr(handle_signal, '_called'):
+        print("Force exit")
+        os._exit(1)
+    handle_signal._called = True
 
 def create_websocket():
     return websocket.WebSocketApp(
@@ -305,6 +317,20 @@ def create_websocket():
         on_close=on_close,
         # note: on_data not necessary if you only care about text frames
     )
+
+def run_websocket_with_timeout(ws):
+    """Run websocket in a thread that can be interrupted"""
+    try:
+        ws.run_forever(
+            ping_interval=PING_INTERVAL,
+            ping_timeout=PING_TIMEOUT,
+            ping_payload="ping",
+            skip_utf8_validation=True,
+            suppress_origin=True,
+        )
+    except Exception as e:
+        if not should_stop.is_set():
+            print(f"WebSocket run_forever exception: {e}")
 
 def main():
     signal.signal(signal.SIGINT, handle_signal)
@@ -317,27 +343,35 @@ def main():
     print("Starting WebSocket with persistent reconnect loop (no rel)...")
 
     backoff = BACKOFF_MIN
+    ws = None
+    ws_thread = None
+    
     while not should_stop.is_set():
         try:
             print("Creating new WebSocket connection...")
             ws = create_websocket()
 
             # Start a watchdog for silent sockets
-            threading.Thread(target=watchdog, args=(ws,), daemon=True).start()
+            watchdog_thread = threading.Thread(target=watchdog, args=(ws,), daemon=True)
+            watchdog_thread.start()
 
             print("Attempting WebSocket connection...")
-            # run_forever will block until close/error
-            ws.run_forever(
-                ping_interval=PING_INTERVAL,
-                ping_timeout=PING_TIMEOUT,
-                ping_payload="ping",
-                skip_utf8_validation=True,
-                suppress_origin=True,
-            )
-
+            # Run websocket in a separate thread so we can interrupt it
+            ws_thread = threading.Thread(target=run_websocket_with_timeout, args=(ws,), daemon=True)
+            ws_thread.start()
+            
+            # Wait for either the websocket thread to finish or stop signal
+            while ws_thread.is_alive() and not should_stop.is_set():
+                should_stop.wait(1)  # Check every second
+            
+            # If stop signal received, force close websocket
             if should_stop.is_set():
+                try:
+                    ws.close()
+                except:
+                    pass
                 break
-
+            
             # If we get here, the socket closed. Backoff and retry.
             print("Socket ended; backing off before reconnect...")
         except Exception as e:
@@ -349,8 +383,16 @@ def main():
         sleep_for = backoff + random.uniform(0, 0.5 * backoff)
         sleep_for = min(sleep_for, BACKOFF_MAX)
         print(f"Reconnecting in {sleep_for:.1f}s...")
-        time.sleep(sleep_for)
+        if should_stop.wait(sleep_for):
+            break
         backoff = min(backoff * 2, BACKOFF_MAX)
+    
+    # Ensure websocket is closed when exiting
+    if ws and getattr(ws, "sock", None):
+        try:
+            ws.close()
+        except:
+            pass
 
     print("WebSocket loop exited")
     fs_close()
