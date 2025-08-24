@@ -78,126 +78,120 @@ def write_event(obj):
                 pass
             _last_fsync = now
 
-def fetch_all_simplified_markets():
-    """Yield pages from /simplified-markets (handles cursor paging)."""
-    cursor = ""  # empty = beginning; 'LTE=' means end per docs
-    while True:
-        url = f"{CLOB_BASE}/simplified-markets"
-        params = {"next_cursor": cursor} if cursor else {}
-        r = requests.get(url, params=params, timeout=20)
-        r.raise_for_status()
-        page = r.json()
-        data = page.get("data", [])
-        if not data:
-            break
-        yield data
-        cursor = page.get("next_cursor") or "LTE="
-        if cursor == "LTE=":
-            break
+def load_cached_markets():
+    """Load markets from cache file created by fetch_markets.py"""
+    import subprocess
+    import sys
+    
+    cache_file = "markets_cache.json"
+    
+    # Check if cache exists and is recent (less than 1 hour old)
+    if os.path.exists(cache_file):
+        cache_age = time.time() - os.path.getmtime(cache_file)
+        if cache_age < 3600:  # 1 hour
+            print(f"Using cached markets (age: {cache_age/60:.1f} minutes)")
+            try:
+                with open(cache_file, 'r') as f:
+                    cache = json.load(f)
+                    return cache.get('markets', {})
+            except Exception as e:
+                print(f"Error loading cache: {e}")
+    
+    # Cache doesn't exist or is old, run fetch_markets.py
+    print("Fetching fresh market data...")
+    try:
+        result = subprocess.run([sys.executable, 'fetch_markets.py'],
+                              capture_output=True, text=True, timeout=300)
+        if result.returncode == 0:
+            print("Market fetch completed successfully")
+            with open(cache_file, 'r') as f:
+                cache = json.load(f)
+                return cache.get('markets', {})
+        else:
+            print(f"Market fetch failed: {result.stderr}")
+            return {}
+    except Exception as e:
+        print(f"Error running market fetch: {e}")
+        return {}
 
 def fetch_markets_and_populate_data(initial=False):
     """
-    Populate allowed_asset_ids / asset_to_market / asset_outcome using Simplified Markets.
-    Unlike the /trades approach, this sees markets even if there are no trades yet.
+    Populate allowed_asset_ids using cached market data for fast startup.
     """
     global subs_version
     new_firsts = 0
-    total_markets_processed = 0
-    active_tradeable_count = 0
-    last_market_title = "None"
     
     try:
-        seen_conditions = set()
         with data_lock:
-            # optional: clear on first init so we fully rebuild from catalog
             if initial:
                 allowed_asset_ids.clear()
                 asset_to_market.clear()
                 asset_outcome.clear()
                 market_to_first_asset.clear()
-
-        page_num = 0
-        for markets in fetch_all_simplified_markets():
-            page_num += 1
-            page_active_tradeable = 0
-            
-            with data_lock:
-                for m in markets:
-                    total_markets_processed += 1
+                
+                # Load from cache
+                markets_data = load_cached_markets()
+                total_markets = len(markets_data)
+                tradeable_count = 0
+                
+                for condition_id, market in markets_data.items():
+                    # Only process markets that meet trading conditions
+                    is_active = market.get("active", False)
+                    is_not_closed = not market.get("closed", True)
+                    is_not_archived = not market.get("archived", True)
+                    is_accepting_orders = market.get("accepting_orders", False)
                     
-                    # Update last market title for ALL markets (not just tradeable ones)
-                    cond = m.get("condition_id") or m.get("conditionId")
-                    if cond:
-                        last_market_title = cond[:50]
-                    
-                    # Check if market meets all active trading conditions
-                    is_active = m.get("active", False)
-                    is_not_closed = not m.get("closed", True)
-                    is_not_archived = not m.get("archived", True)
-                    is_accepting_orders = m.get("accepting_orders", False)
-                    
-                    # Debug: print actual values for first market of first page
-                    if page_num == 1 and total_markets_processed == 1:
-                        print(f"Debug first market: active={is_active}, closed={m.get('closed')}, archived={m.get('archived')}, accepting_orders={is_accepting_orders}")
-                    
-                    if is_active and is_not_closed and is_not_archived and is_accepting_orders:
-                        active_tradeable_count += 1
-                        page_active_tradeable += 1
-                    
-                    # fields per docs: condition_id, tokens (length 2), active/closed, etc.
-                    if not cond or cond in seen_conditions:
+                    if not (is_active and is_not_closed and is_not_archived and is_accepting_orders):
                         continue
-                    seen_conditions.add(cond)
-
-                    tokens = m.get("tokens") or []
+                    
+                    tradeable_count += 1
+                    tokens = market.get("tokens", [])
                     if len(tokens) < 1:
                         continue
-
-                    # Each token should carry a CLOB token id (asset id)
-                    def tok_id(t):
-                        return (
-                            t.get("token_id")
-                            or t.get("clob_token_id")
-                            or t.get("clobTokenId")
-                            or t.get("id")
-                        )
-
-                    # pick first token per market to avoid dup books
-                    first_token = tok_id(tokens[0])
+                        
+                    # Get first token ID
+                    first_token = (
+                        tokens[0].get("token_id") or
+                        tokens[0].get("clob_token_id") or
+                        tokens[0].get("clobTokenId") or
+                        tokens[0].get("id")
+                    )
+                    
                     if not first_token:
                         continue
-
-                    # Use condition_id as market identifier since there's no title/question
-                    title = cond
-                    # outcome names from tokens (e.g., "Chiefs", "Yes", "No")
-                    outcome0 = (tokens[0].get("outcome") or tokens[0].get("name") or "").title()
-
-                    if title and title not in market_to_first_asset:
+                        
+                    # Use condition_id as market title
+                    title = condition_id
+                    outcome = (tokens[0].get("outcome") or tokens[0].get("name") or "").title()
+                    
+                    if title not in market_to_first_asset:
                         market_to_first_asset[title] = first_token
                         allowed_asset_ids.add(first_token)
                         asset_to_market[first_token] = title[:80]
-                        if outcome0:
-                            asset_outcome[first_token] = outcome0
+                        if outcome:
+                            asset_outcome[first_token] = outcome
                         new_firsts += 1
-                    else:
-                        # if we've already mapped this title → first token, still ensure metadata
-                        if title:
-                            asset_to_market[first_token] = title[:80]
-                            if outcome0:
-                                asset_outcome[first_token] = outcome0
+                
+                print(f"Loaded {total_markets} cached markets, {tradeable_count} tradeable, {new_firsts} subscribed assets")
+            else:
+                # For periodic updates, just run incremental fetch
+                try:
+                    result = subprocess.run([sys.executable, 'fetch_markets.py'],
+                                          capture_output=True, text=True, timeout=60)
+                    if result.returncode == 0:
+                        print("Incremental market update completed")
+                        # Reload mappings after update
+                        fetch_markets_and_populate_data(initial=True)
+                except Exception as e:
+                    print(f"Error in incremental update: {e}")
 
-            if initial:
-                print(f"Page {page_num}: {len(markets)} markets, {page_active_tradeable} active/tradeable this page, {active_tradeable_count} total active/tradeable, last: {last_market_title}")
-
-        if initial:
-            print(f"Init from simplified-markets: processed={total_markets_processed} markets, active/tradeable={active_tradeable_count}, allowed_assets={len(allowed_asset_ids)}")
-        elif new_firsts:
+        if new_firsts > 0:
             with ws_lock:
                 subs_version += 1
-            print(f"New first-per-market assets: +{new_firsts} (total {len(allowed_asset_ids)})")
+            print(f"Market update: +{new_firsts} new assets (total {len(allowed_asset_ids)})")
 
     except Exception as e:
-        print(f"fetch_markets (simplified) error: {e}")
+        print(f"fetch_markets error: {e}")
 
 def markets_poll_loop():
     while not should_stop.is_set():
