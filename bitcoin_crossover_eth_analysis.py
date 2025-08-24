@@ -401,6 +401,114 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
     
     return fig
 
+def extract_time_period(market_title: str) -> Optional[str]:
+    """
+    Extract time period from market title.
+    E.g., "Bitcoin Up or Down - August 24, 6AM ET" -> "August 24, 6AM ET"
+    """
+    import re
+    
+    # Look for patterns like "August 24, 6AM ET" or "August 23, 3PM ET"
+    pattern = r'(August \d+, \d+[AP]M ET)'
+    match = re.search(pattern, market_title)
+    if match:
+        return match.group(1)
+    
+    # Look for other date/time patterns if needed
+    # Add more patterns here as needed
+    
+    return None
+
+def find_matching_markets(bitcoin_df: pd.DataFrame, ethereum_df: pd.DataFrame,
+                         solana_df: pd.DataFrame, xrp_df: pd.DataFrame) -> List[Dict]:
+    """
+    Find Bitcoin markets and their corresponding ETH, SOL, XRP markets with matching time periods.
+    Returns list of market groups with matching time periods.
+    """
+    print("Finding Bitcoin markets with matching ETH, SOL, XRP markets...")
+    
+    # Get all unique Bitcoin markets that match "Up or Down" pattern
+    bitcoin_markets = []
+    for _, row in bitcoin_df.iterrows():
+        title = row['market_title']
+        if 'up or down' in title.lower() and 'august' in title.lower():
+            time_period = extract_time_period(title)
+            if time_period:
+                bitcoin_markets.append({
+                    'asset_id': row['asset_id'],
+                    'title': title,
+                    'time_period': time_period
+                })
+    
+    # Remove duplicates based on asset_id
+    bitcoin_markets = {m['asset_id']: m for m in bitcoin_markets}.values()
+    bitcoin_markets = list(bitcoin_markets)
+    
+    print(f"Found {len(bitcoin_markets)} Bitcoin 'Up or Down' markets")
+    
+    # For each Bitcoin market, find matching ETH, SOL, XRP markets
+    market_groups = []
+    
+    for btc_market in bitcoin_markets:
+        time_period = btc_market['time_period']
+        print(f"\nLooking for matches for Bitcoin market: {btc_market['title']}")
+        print(f"Time period: {time_period}")
+        
+        group = {
+            'time_period': time_period,
+            'bitcoin': btc_market,
+            'matches': {}
+        }
+        
+        # Find matching ETH market
+        for _, row in ethereum_df.iterrows():
+            title = row['market_title']
+            if ('up or down' in title.lower() and
+                'ethereum' in title.lower() and
+                time_period in title):
+                group['matches']['ETH'] = {
+                    'asset_id': row['asset_id'],
+                    'title': title
+                }
+                print(f"  Found ETH match: {title}")
+                break
+        
+        # Find matching SOL market
+        for _, row in solana_df.iterrows():
+            title = row['market_title']
+            if ('up or down' in title.lower() and
+                'solana' in title.lower() and
+                time_period in title):
+                group['matches']['SOL'] = {
+                    'asset_id': row['asset_id'],
+                    'title': title
+                }
+                print(f"  Found SOL match: {title}")
+                break
+        
+        # Find matching XRP market
+        for _, row in xrp_df.iterrows():
+            title = row['market_title']
+            if ('up or down' in title.lower() and
+                'xrp' in title.lower() and
+                time_period in title):
+                group['matches']['XRP'] = {
+                    'asset_id': row['asset_id'],
+                    'title': title
+                }
+                print(f"  Found XRP match: {title}")
+                break
+        
+        # Only include groups that have at least one match
+        if group['matches']:
+            market_groups.append(group)
+            print(f"  Added group with {len(group['matches'])} matches")
+        else:
+            print(f"  No matches found for this Bitcoin market")
+    
+    print(f"\nFound {len(market_groups)} Bitcoin markets with at least one matching crypto market")
+    return market_groups
+
 def main():
     parser = argparse.ArgumentParser(
         description='Bitcoin Crossover Multi-Crypto Analysis - Detects when Bitcoin bid reaches WINDOW ms ago\'s ask (or vice versa) and measures ETH, SOL, and XRP price changes.',
@@ -445,65 +553,107 @@ Examples:
             print("Need Bitcoin data for crossover detection!")
             sys.exit(1)
         
-        # Get the most active Bitcoin asset
-        bitcoin_asset = bitcoin_df['asset_id'].value_counts().index[0]
-        bitcoin_data = bitcoin_df[bitcoin_df['asset_id'] == bitcoin_asset].copy()
+        # Find matching markets by time period
+        market_groups = find_matching_markets(bitcoin_df, ethereum_df, solana_df, xrp_df)
         
-        # Prepare dependent variable data
-        crypto_dfs = {}
-        crypto_names = []
-        
-        if not ethereum_df.empty:
-            ethereum_asset = ethereum_df['asset_id'].value_counts().index[0]
-            crypto_dfs['ETH'] = ethereum_df[ethereum_df['asset_id'] == ethereum_asset].copy()
-            crypto_names.append('ETH')
-        
-        if not solana_df.empty:
-            solana_asset = solana_df['asset_id'].value_counts().index[0]
-            crypto_dfs['SOL'] = solana_df[solana_df['asset_id'] == solana_asset].copy()
-            crypto_names.append('SOL')
-        
-        if not xrp_df.empty:
-            xrp_asset = xrp_df['asset_id'].value_counts().index[0]
-            crypto_dfs['XRP'] = xrp_df[xrp_df['asset_id'] == xrp_asset].copy()
-            crypto_names.append('XRP')
-        
-        if not crypto_dfs:
-            print("Need at least one dependent variable (ETH, SOL, or XRP) data!")
+        if not market_groups:
+            print("No Bitcoin markets with matching ETH/SOL/XRP markets found!")
             sys.exit(1)
         
-        print(f"\nAnalyzing:")
-        print(f"Bitcoin: {bitcoin_data['market_title'].iloc[0]} ({len(bitcoin_data)} points)")
-        for name, df in crypto_dfs.items():
-            print(f"{name}: {df['market_title'].iloc[0]} ({len(df)} points)")
-        print(f"Window: {window_ms}ms")
+        # Process each market group
+        all_results = []
+        all_crypto_names = set()
         
-        # Initialize crossover detector
-        detector = CrossoverDetector(window_ms=window_ms)
+        for group in market_groups:
+            print(f"\n" + "="*80)
+            print(f"PROCESSING MARKET GROUP: {group['time_period']}")
+            print(f"="*80)
+            
+            # Get Bitcoin data for this group
+            bitcoin_asset_id = group['bitcoin']['asset_id']
+            bitcoin_data = bitcoin_df[bitcoin_df['asset_id'] == bitcoin_asset_id].copy()
+            
+            if bitcoin_data.empty:
+                print(f"No Bitcoin data found for asset {bitcoin_asset_id}")
+                continue
+            
+            # Prepare dependent variable data for this group
+            crypto_dfs = {}
+            crypto_names = []
+            
+            for crypto_name, match_info in group['matches'].items():
+                if crypto_name == 'ETH' and not ethereum_df.empty:
+                    crypto_asset_id = match_info['asset_id']
+                    crypto_data = ethereum_df[ethereum_df['asset_id'] == crypto_asset_id].copy()
+                    if not crypto_data.empty:
+                        crypto_dfs['ETH'] = crypto_data
+                        crypto_names.append('ETH')
+                        all_crypto_names.add('ETH')
+                
+                elif crypto_name == 'SOL' and not solana_df.empty:
+                    crypto_asset_id = match_info['asset_id']
+                    crypto_data = solana_df[solana_df['asset_id'] == crypto_asset_id].copy()
+                    if not crypto_data.empty:
+                        crypto_dfs['SOL'] = crypto_data
+                        crypto_names.append('SOL')
+                        all_crypto_names.add('SOL')
+                
+                elif crypto_name == 'XRP' and not xrp_df.empty:
+                    crypto_asset_id = match_info['asset_id']
+                    crypto_data = xrp_df[xrp_df['asset_id'] == crypto_asset_id].copy()
+                    if not crypto_data.empty:
+                        crypto_dfs['XRP'] = crypto_data
+                        crypto_names.append('XRP')
+                        all_crypto_names.add('XRP')
+            
+            if not crypto_dfs:
+                print(f"No matching crypto data found for this group")
+                continue
+            
+            print(f"\nAnalyzing:")
+            print(f"Bitcoin: {bitcoin_data['market_title'].iloc[0]} ({len(bitcoin_data)} points)")
+            for name, df in crypto_dfs.items():
+                print(f"{name}: {df['market_title'].iloc[0]} ({len(df)} points)")
+            print(f"Window: {window_ms}ms")
+            
+            # Initialize crossover detector
+            detector = CrossoverDetector(window_ms=window_ms)
+            
+            # Detect crossovers
+            crossovers = detector.detect_crossovers(bitcoin_data)
+            
+            if not crossovers:
+                print("No crossover events found for this group!")
+                continue
+            
+            # Measure crypto responses
+            results = detector.measure_crypto_responses(crossovers, crypto_dfs, stability_threshold)
+            
+            if not results:
+                print("No crypto response data could be measured for this group!")
+                continue
+            
+            # Add group info to results
+            for result in results:
+                result['market_group'] = group['time_period']
+                result['bitcoin_title'] = group['bitcoin']['title']
+            
+            all_results.extend(results)
         
-        # Detect crossovers
-        crossovers = detector.detect_crossovers(bitcoin_data)
-        
-        if not crossovers:
-            print("No crossover events found!")
+        if not all_results:
+            print("No crossover events found across all market groups!")
             sys.exit(1)
         
-        # Measure crypto responses
-        results = detector.measure_crypto_responses(crossovers, crypto_dfs, stability_threshold)
-        
-        if not results:
-            print("No crypto response data could be measured!")
-            sys.exit(1)
-        
-        # Analyze results
-        analysis = analyze_crossover_results(results, crypto_names)
+        # Analyze combined results
+        all_crypto_names = sorted(list(all_crypto_names))
+        analysis = analyze_crossover_results(all_results, all_crypto_names)
         
         # Create visualization
         filter_suffix = ""
         if title_filter:
             filter_suffix += f"_filtered_{title_filter.replace(' ', '_')}"
         
-        crypto_suffix = "_".join(crypto_names)
+        crypto_suffix = "_".join(all_crypto_names)
         output_file = f"bitcoin_crossover_{crypto_suffix.lower()}_analysis{filter_suffix}_w{window_ms}ms.png"
         
         fig = create_analysis_plot(analysis, output_file=output_file)
@@ -512,9 +662,8 @@ Examples:
         print(f"\n" + "="*70)
         print(f"BITCOIN CROSSOVER → MULTI-CRYPTO RESPONSE ANALYSIS")
         print(f"="*70)
-        print(f"Bitcoin Market: {bitcoin_data['market_title'].iloc[0]}")
-        for name, df in crypto_dfs.items():
-            print(f"{name} Market: {df['market_title'].iloc[0]}")
+        print(f"Analyzed {len(market_groups)} market groups with matching time periods")
+        print(f"Total events across all groups: {len(all_results)}")
         print(f"Analysis Window: {window_ms} ms")
         
         print(f"\nCROSSOVER EVENTS:")
@@ -524,7 +673,7 @@ Examples:
         
         intervals = ['200ms', '400ms', '600ms', '800ms', '1000ms']
         
-        for crypto_name in crypto_names:
+        for crypto_name in all_crypto_names:
             print(f"\nAVERAGE {crypto_name} RESPONSES:")
             
             for event_type in ['bid_crosses_ask', 'ask_crosses_bid']:
