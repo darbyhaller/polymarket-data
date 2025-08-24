@@ -204,7 +204,7 @@ def get_tradeable_asset_mappings(force_update=False):
         # Check if cache exists and is recent (less than 5 minutes old)
         if os.path.exists(CACHE_FILE):
             cache_age = time.time() - os.path.getmtime(CACHE_FILE)
-            if cache_age > 300:  # 5 minutes
+            if cache_age > 30:  # 30 seconds
                 print(f"Cache is {cache_age/60:.1f} minutes old, updating...")
                 markets = update_markets_cache(full_refresh=False)
             else:
