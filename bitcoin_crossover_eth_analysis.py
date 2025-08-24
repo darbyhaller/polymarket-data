@@ -374,8 +374,15 @@ def create_analysis_plot(analysis: Dict, output_file: str = None):
     
     plot_idx = 0
     for crypto_name in crypto_names:
-        # Get color from configuration, fallback to gray
-        crypto_color = CRYPTO_COLORS.get(crypto_name.lower(), 'gray')
+        # Get color from configuration using full crypto name, fallback to gray
+        # First find the full crypto name from the short name
+        full_crypto_name = None
+        for full_name, short_name in CRYPTO_SHORT_NAMES.items():
+            if short_name == crypto_name:
+                full_crypto_name = full_name
+                break
+        
+        crypto_color = CRYPTO_COLORS.get(full_crypto_name, 'gray') if full_crypto_name else 'gray'
         
         # Plot for bid crosses ask
         ax_bid = axes[plot_idx // 2, plot_idx % 2]
