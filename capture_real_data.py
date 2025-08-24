@@ -10,7 +10,7 @@ from fetch_markets import get_tradeable_asset_mappings
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
 OUTFILE = "./orderbook_clip.jsonl"
-MARKETS_UPDATE_INTERVAL = 60
+MARKETS_UPDATE_INTERVAL = 10
 PING_INTERVAL = 30
 PING_TIMEOUT = 10
 FSYNC_EVERY_SEC = 5.0
