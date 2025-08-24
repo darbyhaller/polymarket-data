@@ -21,7 +21,7 @@ OUTFILE = "./orderbook_clip.jsonl"      # adjust if needed
 MARKETS_UPDATE_INTERVAL = 10                          # seconds (catch new markets quickly)
 PING_INTERVAL = 30                                    # Increased from 15 to reduce ping frequency
 PING_TIMEOUT = 10                                     # Increased from 5 to allow more time for pong
-FSYNC_EVERY_SEC = 1.0
+FSYNC_EVERY_SEC = 5.0
 
 # state
 data_lock = Lock()
@@ -34,10 +34,13 @@ asset_outcome = {}
 market_to_first_asset = {}
 seen_hashes = set()
 
-subs_version = 0                 # bump when allowed_asset_ids grows
+# Track subscriptions for delta updates
+subscribed_asset_ids = set()     # currently subscribed asset IDs
+subs_version = 0                 # bump when allowed_asset_ids changes
 sent_version = -1
 should_stop = Event()
 last_message_time = 0.0
+is_first_subscription = True     # track if this is the first subscription
 
 outfile_handle = None
 _last_fsync = 0.0
@@ -148,21 +151,55 @@ def markets_poll_loop():
         fetch_markets_and_populate_data(initial=False)
 
 def send_subscription(ws):
+    global subscribed_asset_ids, is_first_subscription
+    
     with data_lock:
-        ids = list(allowed_asset_ids)
-    sub = {"assets_ids": ids, "type": "market", "initial_dump": True}
-    ws.send(json.dumps(sub))
-    print(f"(Re)subscribed to {len(ids)} asset IDs")
+        current_ids = set(allowed_asset_ids)
+        
+        # Calculate deltas
+        new_ids = current_ids - subscribed_asset_ids
+        removed_ids = subscribed_asset_ids - current_ids
+        
+        # If this is the first subscription or we have a major change, do full subscription
+        if is_first_subscription or len(new_ids) + len(removed_ids) > len(current_ids) * 0.5:
+            # Full subscription with initial dump
+            sub = {"assets_ids": list(current_ids), "type": "market", "initial_dump": True}
+            ws.send(json.dumps(sub))
+            subscribed_asset_ids = current_ids.copy()
+            print(f"Full subscription to {len(current_ids)} asset IDs (initial_dump=True)")
+            is_first_subscription = False
+        else:
+            # Delta updates
+            if new_ids:
+                # Subscribe to new IDs with initial dump
+                sub = {"assets_ids": list(new_ids), "type": "market", "initial_dump": True}
+                ws.send(json.dumps(sub))
+                print(f"Subscribed to {len(new_ids)} new asset IDs (initial_dump=True)")
+            
+            if removed_ids:
+                # Unsubscribe from removed IDs
+                unsub = {"assets_ids": list(removed_ids), "type": "market", "unsubscribe": True}
+                ws.send(json.dumps(unsub))
+                print(f"Unsubscribed from {len(removed_ids)} asset IDs")
+            
+            # Update tracking
+            subscribed_asset_ids = current_ids.copy()
+            
+            if not new_ids and not removed_ids:
+                print(f"No subscription changes needed ({len(current_ids)} assets)")
 
 # WebSocket callbacks
 def on_open(ws):
-    global sent_version, last_message_time
+    global sent_version, last_message_time, is_first_subscription
     last_message_time = time.time()
     print("WebSocket connected")
     if not allowed_asset_ids:
         print("No allowed asset IDs; closing")
         ws.close()
         return
+    
+    # Reset first subscription flag on new connection
+    is_first_subscription = True
     send_subscription(ws)
     with ws_lock:
         sent_version = subs_version
