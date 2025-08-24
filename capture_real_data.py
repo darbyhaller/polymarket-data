@@ -14,9 +14,10 @@ from threading import Lock, Event
 from datetime import datetime
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+CLOB_BASE = "https://clob.polymarket.com"
 # OUTFILE = "/data/polybook/orderbook_clip.jsonl"      # adjust if needed
 OUTFILE = "./orderbook_clip.jsonl"      # adjust if needed
-TRADES_UPDATE_INTERVAL = 10                           # seconds
+MARKETS_UPDATE_INTERVAL = 60                          # seconds (less frequent than trades)
 PING_INTERVAL = 15
 PING_TIMEOUT = 5
 FSYNC_EVERY_SEC = 1.0
@@ -77,48 +78,130 @@ def write_event(obj):
                 pass
             _last_fsync = now
 
-def fetch_markets_and_populate_data(initial=False):
-    """Poll recent trades and maintain first-per-market asset set."""
-    global subs_version
-    try:
-        limit = "1000000" if initial else "5000"
-        r = requests.get(f"https://data-api.polymarket.com/trades?limit={limit}", timeout=20)
+def fetch_all_simplified_markets():
+    """Yield pages from /simplified-markets (handles cursor paging)."""
+    cursor = ""  # empty = beginning; 'LTE=' means end per docs
+    while True:
+        url = f"{CLOB_BASE}/simplified-markets"
+        params = {"next_cursor": cursor} if cursor else {}
+        r = requests.get(url, params=params, timeout=20)
         r.raise_for_status()
-        trades = r.json()
-        new_firsts = 0
+        page = r.json()
+        data = page.get("data", [])
+        if not data:
+            break
+        yield data
+        cursor = page.get("next_cursor") or "LTE="
+        if cursor == "LTE=":
+            break
+
+def fetch_markets_and_populate_data(initial=False):
+    """
+    Populate allowed_asset_ids / asset_to_market / asset_outcome using Simplified Markets.
+    Unlike the /trades approach, this sees markets even if there are no trades yet.
+    """
+    global subs_version
+    new_firsts = 0
+    total_markets_processed = 0
+    active_tradeable_count = 0
+    last_market_title = "None"
+    
+    try:
+        seen_conditions = set()
         with data_lock:
-            seen_local = set()
-            for t in trades:
-                aid = t.get("asset")
-                title = (t.get("title") or "").strip()
-                if not aid or aid in seen_local:
-                    continue
-                seen_local.add(aid)
-                if title and title not in market_to_first_asset:
-                    market_to_first_asset[title] = aid
-                    allowed_asset_ids.add(aid)
-                    new_firsts += 1
-                elif title and market_to_first_asset.get(title) == aid:
-                    if aid not in allowed_asset_ids:
-                        allowed_asset_ids.add(aid)
+            # optional: clear on first init so we fully rebuild from catalog
+            if initial:
+                allowed_asset_ids.clear()
+                asset_to_market.clear()
+                asset_outcome.clear()
+                market_to_first_asset.clear()
+
+        page_num = 0
+        for markets in fetch_all_simplified_markets():
+            page_num += 1
+            page_active_tradeable = 0
+            
+            with data_lock:
+                for m in markets:
+                    total_markets_processed += 1
+                    
+                    # Update last market title for ALL markets (not just tradeable ones)
+                    cond = m.get("condition_id") or m.get("conditionId")
+                    if cond:
+                        last_market_title = cond[:50]
+                    
+                    # Check if market meets all active trading conditions
+                    is_active = m.get("active", False)
+                    is_not_closed = not m.get("closed", True)
+                    is_not_archived = not m.get("archived", True)
+                    is_accepting_orders = m.get("accepting_orders", False)
+                    
+                    # Debug: print actual values for first market of first page
+                    if page_num == 1 and total_markets_processed == 1:
+                        print(f"Debug first market: active={is_active}, closed={m.get('closed')}, archived={m.get('archived')}, accepting_orders={is_accepting_orders}")
+                    
+                    if is_active and is_not_closed and is_not_archived and is_accepting_orders:
+                        active_tradeable_count += 1
+                        page_active_tradeable += 1
+                    
+                    # fields per docs: condition_id, tokens (length 2), active/closed, etc.
+                    if not cond or cond in seen_conditions:
+                        continue
+                    seen_conditions.add(cond)
+
+                    tokens = m.get("tokens") or []
+                    if len(tokens) < 1:
+                        continue
+
+                    # Each token should carry a CLOB token id (asset id)
+                    def tok_id(t):
+                        return (
+                            t.get("token_id")
+                            or t.get("clob_token_id")
+                            or t.get("clobTokenId")
+                            or t.get("id")
+                        )
+
+                    # pick first token per market to avoid dup books
+                    first_token = tok_id(tokens[0])
+                    if not first_token:
+                        continue
+
+                    # Use condition_id as market identifier since there's no title/question
+                    title = cond
+                    # outcome names from tokens (e.g., "Chiefs", "Yes", "No")
+                    outcome0 = (tokens[0].get("outcome") or tokens[0].get("name") or "").title()
+
+                    if title and title not in market_to_first_asset:
+                        market_to_first_asset[title] = first_token
+                        allowed_asset_ids.add(first_token)
+                        asset_to_market[first_token] = title[:80]
+                        if outcome0:
+                            asset_outcome[first_token] = outcome0
                         new_firsts += 1
-                if title:
-                    asset_to_market[aid] = title[:80]
-                if t.get("outcome"):
-                    asset_outcome[aid] = t["outcome"].title()
+                    else:
+                        # if we've already mapped this title → first token, still ensure metadata
+                        if title:
+                            asset_to_market[first_token] = title[:80]
+                            if outcome0:
+                                asset_outcome[first_token] = outcome0
+
+            if initial:
+                print(f"Page {page_num}: {len(markets)} markets, {page_active_tradeable} active/tradeable this page, {active_tradeable_count} total active/tradeable, last: {last_market_title}")
+
         if initial:
-            print(f"Init: markets={len(market_to_first_asset)} allowed_assets={len(allowed_asset_ids)}")
+            print(f"Init from simplified-markets: processed={total_markets_processed} markets, active/tradeable={active_tradeable_count}, allowed_assets={len(allowed_asset_ids)}")
         elif new_firsts:
             with ws_lock:
-                # bump version so the ws refresher resubscribes
                 subs_version += 1
             print(f"New first-per-market assets: +{new_firsts} (total {len(allowed_asset_ids)})")
-    except Exception as e:
-        print(f"fetch_markets error: {e}")
 
-def trades_poll_loop():
+    except Exception as e:
+        print(f"fetch_markets (simplified) error: {e}")
+
+def markets_poll_loop():
     while not should_stop.is_set():
-        time.sleep(TRADES_UPDATE_INTERVAL)
+        time.sleep(MARKETS_UPDATE_INTERVAL)
         fetch_markets_and_populate_data(initial=False)
 
 def send_subscription(ws):
@@ -270,8 +353,8 @@ def main():
     fs_open()
     fetch_markets_and_populate_data(initial=True)
 
-    # background polling of trades to grow allowed_asset_ids
-    threading.Thread(target=trades_poll_loop, daemon=True).start()
+    # background polling of markets to grow allowed_asset_ids
+    threading.Thread(target=markets_poll_loop, daemon=True).start()
 
     # websocket app + rel dispatcher (auto-reconnect)
     ws = websocket.WebSocketApp(
