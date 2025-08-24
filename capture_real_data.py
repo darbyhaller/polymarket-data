@@ -248,35 +248,21 @@ def send_subscription(ws):
         new_ids = current_ids - subscribed_asset_ids
         removed_ids = subscribed_asset_ids - current_ids
 
-        print(f"Subscription check: current={len(current_ids)}, subscribed={len(subscribed_asset_ids)}, new={len(new_ids)}, removed={len(removed_ids)}, first={is_first_subscription}")
-
         if is_first_subscription or len(new_ids) + len(removed_ids) > max(1, int(len(current_ids) * 0.5)):
             sub = {"assets_ids": list(current_ids), "type": "market", "initial_dump": True}
-            try:
-                ws.send(json.dumps(sub))
-                subscribed_asset_ids = current_ids.copy()
-                print(f"Full subscription to {len(current_ids)} asset IDs (initial_dump=True)")
-                is_first_subscription = False
-            except Exception as e:
-                print(f"Failed to send subscription: {e}")
-                raise
+            ws.send(json.dumps(sub))
+            subscribed_asset_ids = current_ids.copy()
+            print(f"Full subscription to {len(current_ids)} asset IDs (initial_dump=True)")
+            is_first_subscription = False
         else:
             if new_ids:
                 sub = {"assets_ids": list(new_ids), "type": "market", "initial_dump": False}
-                try:
-                    ws.send(json.dumps(sub))
-                    print(f"Subscribed to {len(new_ids)} new asset IDs (initial_dump=False)")
-                except Exception as e:
-                    print(f"Failed to send new subscription: {e}")
-                    raise
+                ws.send(json.dumps(sub))
+                print(f"Subscribed to {len(new_ids)} new asset IDs (initial_dump=False)")
             if removed_ids:
                 unsub = {"assets_ids": list(removed_ids), "type": "market", "unsubscribe": True}
-                try:
-                    ws.send(json.dumps(unsub))
-                    print(f"Unsubscribed from {len(removed_ids)} asset IDs")
-                except Exception as e:
-                    print(f"Failed to send unsubscription: {e}")
-                    raise
+                ws.send(json.dumps(unsub))
+                print(f"Unsubscribed from {len(removed_ids)} asset IDs")
             subscribed_asset_ids = current_ids.copy()
             if not new_ids and not removed_ids:
                 print(f"No subscription changes needed ({len(current_ids)} assets)")
@@ -313,19 +299,6 @@ def on_message(ws, msg):
     global last_message_time
     last_message_time = time.time()
     recv_ms = int(last_message_time * 1000)
-    
-    # Add periodic message count logging
-    if not hasattr(on_message, 'msg_count'):
-        on_message.msg_count = 0
-        on_message.last_log_time = time.time()
-    
-    on_message.msg_count += 1
-    
-    # Log message count every 100 messages or every 60 seconds
-    if on_message.msg_count % 100 == 0 or (time.time() - on_message.last_log_time) > 60:
-        print(f"Received {on_message.msg_count} WebSocket messages")
-        on_message.last_log_time = time.time()
-    
     try:
         if isinstance(msg, (bytes, bytearray)):
             try:
@@ -346,7 +319,6 @@ def on_message(ws, msg):
             return
 
         events = payload if isinstance(payload, list) else [payload]
-        events_written = 0
         for d in events:
             et = d.get("event_type", "unknown")
             aid = d.get("asset_id")
@@ -399,12 +371,6 @@ def on_message(ws, msg):
                 if k not in base:
                     base[k] = v
             write_event(base)
-            events_written += 1
-        
-        # Log first few events to see what we're getting
-        if on_message.msg_count <= 5:
-            print(f"Message {on_message.msg_count}: {len(events)} events, {events_written} written to file")
-            
     except Exception as e:
         print(f"on_message error: {e}")
 
