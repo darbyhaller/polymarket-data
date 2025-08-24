@@ -12,12 +12,13 @@ import requests
 import websocket, rel  # pip install websocket-client rel
 from threading import Lock, Event
 from datetime import datetime
+from fetch_markets import get_tradeable_asset_mappings
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
 # OUTFILE = "/data/polybook/orderbook_clip.jsonl"      # adjust if needed
 OUTFILE = "./orderbook_clip.jsonl"      # adjust if needed
-MARKETS_UPDATE_INTERVAL = 60                          # seconds (less frequent than trades)
+MARKETS_UPDATE_INTERVAL = 10                          # seconds (catch new markets quickly)
 PING_INTERVAL = 15
 PING_TIMEOUT = 5
 FSYNC_EVERY_SEC = 1.0
@@ -78,120 +79,68 @@ def write_event(obj):
                 pass
             _last_fsync = now
 
-def load_cached_markets():
-    """Load markets from cache file created by fetch_markets.py"""
-    import subprocess
-    import sys
+def update_asset_mappings_from_api(force_update=False):
+    """
+    Update asset mappings using the fetch_markets API.
     
-    cache_file = "markets_cache.json"
+    Args:
+        force_update (bool): If True, force a full cache refresh
+        
+    Returns:
+        int: Number of new assets added
+    """
+    global subs_version
+    new_assets = 0
     
-    # Check if cache exists and is recent (less than 1 hour old)
-    if os.path.exists(cache_file):
-        cache_age = time.time() - os.path.getmtime(cache_file)
-        if cache_age < 3600:  # 1 hour
-            print(f"Using cached markets (age: {cache_age/60:.1f} minutes)")
-            try:
-                with open(cache_file, 'r') as f:
-                    cache = json.load(f)
-                    return cache.get('markets', {})
-            except Exception as e:
-                print(f"Error loading cache: {e}")
-    
-    # Cache doesn't exist or is old, run fetch_markets.py
-    print("Fetching fresh market data...")
     try:
-        result = subprocess.run([sys.executable, 'fetch_markets.py'],
-                              capture_output=True, text=True, timeout=300)
-        if result.returncode == 0:
-            print("Market fetch completed successfully")
-            with open(cache_file, 'r') as f:
-                cache = json.load(f)
-                return cache.get('markets', {})
-        else:
-            print(f"Market fetch failed: {result.stderr}")
-            return {}
+        # Get fresh mappings from the API
+        mappings = get_tradeable_asset_mappings(force_update=force_update)
+        
+        with data_lock:
+            # Store current size for comparison
+            old_size = len(allowed_asset_ids)
+            
+            # Update all mappings
+            allowed_asset_ids.clear()
+            asset_to_market.clear()
+            asset_outcome.clear()
+            market_to_first_asset.clear()
+            
+            # Populate from API response
+            allowed_asset_ids.update(mappings['allowed_asset_ids'])
+            asset_to_market.update(mappings['asset_to_market'])
+            asset_outcome.update(mappings['asset_outcome'])
+            market_to_first_asset.update(mappings['market_to_first_asset'])
+            
+            new_assets = len(allowed_asset_ids) - old_size
+            
+            print(f"Updated mappings: {mappings['total_markets']} total markets, "
+                  f"{mappings['tradeable_markets']} tradeable, "
+                  f"{len(allowed_asset_ids)} subscribed assets")
+        
+        if new_assets != 0:  # Changed from > 0 to != 0 to handle both additions and removals
+            with ws_lock:
+                subs_version += 1
+            if new_assets > 0:
+                print(f"Market update: +{new_assets} new assets")
+            else:
+                print(f"Market update: {abs(new_assets)} assets removed")
+                
     except Exception as e:
-        print(f"Error running market fetch: {e}")
-        return {}
+        print(f"Error updating asset mappings: {e}")
+        
+    return max(0, new_assets)  # Return 0 if negative
 
 def fetch_markets_and_populate_data(initial=False):
     """
-    Populate allowed_asset_ids using cached market data for fast startup.
+    Populate allowed_asset_ids using the fetch_markets API.
     """
-    global subs_version
-    new_firsts = 0
-    
-    try:
-        with data_lock:
-            if initial:
-                allowed_asset_ids.clear()
-                asset_to_market.clear()
-                asset_outcome.clear()
-                market_to_first_asset.clear()
-                
-                # Load from cache
-                markets_data = load_cached_markets()
-                total_markets = len(markets_data)
-                tradeable_count = 0
-                
-                for condition_id, market in markets_data.items():
-                    # Only process markets that meet trading conditions
-                    is_active = market.get("active", False)
-                    is_not_closed = not market.get("closed", True)
-                    is_not_archived = not market.get("archived", True)
-                    is_accepting_orders = market.get("accepting_orders", False)
-                    
-                    if not (is_active and is_not_closed and is_not_archived and is_accepting_orders):
-                        continue
-                    
-                    tradeable_count += 1
-                    tokens = market.get("tokens", [])
-                    if len(tokens) < 1:
-                        continue
-                        
-                    # Get first token ID
-                    first_token = (
-                        tokens[0].get("token_id") or
-                        tokens[0].get("clob_token_id") or
-                        tokens[0].get("clobTokenId") or
-                        tokens[0].get("id")
-                    )
-                    
-                    if not first_token:
-                        continue
-                        
-                    # Use condition_id as market title
-                    title = condition_id
-                    outcome = (tokens[0].get("outcome") or tokens[0].get("name") or "").title()
-                    
-                    if title not in market_to_first_asset:
-                        market_to_first_asset[title] = first_token
-                        allowed_asset_ids.add(first_token)
-                        asset_to_market[first_token] = title[:80]
-                        if outcome:
-                            asset_outcome[first_token] = outcome
-                        new_firsts += 1
-                
-                print(f"Loaded {total_markets} cached markets, {tradeable_count} tradeable, {new_firsts} subscribed assets")
-            else:
-                # For periodic updates, just run incremental fetch
-                try:
-                    result = subprocess.run([sys.executable, 'fetch_markets.py'],
-                                          capture_output=True, text=True, timeout=60)
-                    if result.returncode == 0:
-                        print("Incremental market update completed")
-                        # Reload mappings after update
-                        fetch_markets_and_populate_data(initial=True)
-                except Exception as e:
-                    print(f"Error in incremental update: {e}")
-
-        if new_firsts > 0:
-            with ws_lock:
-                subs_version += 1
-            print(f"Market update: +{new_firsts} new assets (total {len(allowed_asset_ids)})")
-
-    except Exception as e:
-        print(f"fetch_markets error: {e}")
+    if initial:
+        print("Initial market data load...")
+        update_asset_mappings_from_api(force_update=False)
+    else:
+        print("Periodic market update...")
+        update_asset_mappings_from_api(force_update=False)
 
 def markets_poll_loop():
     while not should_stop.is_set():

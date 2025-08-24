@@ -132,15 +132,16 @@ def get_tradeable_markets():
     return tradeable
 
 def extract_asset_mappings():
-    """Extract asset ID mappings for WebSocket subscription."""
-    markets_data, _ = load_cache()
+    """Extract asset ID mappings for WebSocket subscription from tradeable markets only."""
+    # Get only tradeable markets that meet all conditions
+    tradeable_markets = get_tradeable_markets()
     
     allowed_asset_ids = set()
     asset_to_market = {}
     asset_outcome = {}
     market_to_first_asset = {}
     
-    for condition_id, market in markets_data.items():
+    for condition_id, market in tradeable_markets.items():
         tokens = market.get("tokens", [])
         if len(tokens) < 1:
             continue
@@ -174,18 +175,57 @@ def extract_asset_mappings():
         'market_to_first_asset': market_to_first_asset
     }
 
+def get_tradeable_asset_mappings(force_update=False):
+    """
+    Get asset mappings for tradeable markets, updating cache if needed.
+    
+    Args:
+        force_update (bool): If True, force a full cache refresh
+        
+    Returns:
+        dict: Asset mappings with keys:
+            - allowed_asset_ids: list of asset IDs to subscribe to
+            - asset_to_market: mapping from asset ID to market title
+            - asset_outcome: mapping from asset ID to outcome name
+            - market_to_first_asset: mapping from market to first asset ID
+            - total_markets: total number of markets in cache
+            - tradeable_markets: number of tradeable markets
+    """
+    # Update cache if needed
+    if force_update:
+        markets = update_markets_cache(full_refresh=True)
+    else:
+        # Check if cache exists and is recent (less than 5 minutes old)
+        if os.path.exists(CACHE_FILE):
+            cache_age = time.time() - os.path.getmtime(CACHE_FILE)
+            if cache_age > 300:  # 5 minutes
+                print(f"Cache is {cache_age/60:.1f} minutes old, updating...")
+                markets = update_markets_cache(full_refresh=False)
+            else:
+                markets, _ = load_cache()
+        else:
+            print("No cache found, performing full refresh...")
+            markets = update_markets_cache(full_refresh=True)
+    
+    # Get tradeable markets and extract mappings
+    tradeable = get_tradeable_markets()
+    mappings = extract_asset_mappings()
+    
+    # Add summary information
+    mappings['total_markets'] = len(markets)
+    mappings['tradeable_markets'] = len(tradeable)
+    
+    return mappings
+
 if __name__ == "__main__":
     import sys
     
     if len(sys.argv) > 1 and sys.argv[1] == "--full":
-        markets = update_markets_cache(full_refresh=True)
+        mappings = get_tradeable_asset_mappings(force_update=True)
     else:
-        markets = update_markets_cache(full_refresh=False)
-    
-    tradeable = get_tradeable_markets()
-    mappings = extract_asset_mappings()
+        mappings = get_tradeable_asset_mappings(force_update=False)
     
     print(f"\nSummary:")
-    print(f"Total markets: {len(markets)}")
-    print(f"Tradeable markets: {len(tradeable)}")
+    print(f"Total markets: {mappings['total_markets']}")
+    print(f"Tradeable markets: {mappings['tradeable_markets']}")
     print(f"Asset IDs for subscription: {len(mappings['allowed_asset_ids'])}")
