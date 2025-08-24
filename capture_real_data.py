@@ -86,6 +86,20 @@ def fs_open():
     _last_fsync = time.time()
     print(f"Opened {OUTFILE} (append)")
 
+def fs_health_check():
+    """Check if file handle is still valid and working."""
+    global outfile_handle
+    if outfile_handle is None:
+        return False
+    try:
+        # Test if we can get the file descriptor
+        outfile_handle.fileno()
+        # Test if we can flush (this will fail if handle is corrupted)
+        outfile_handle.flush()
+        return True
+    except Exception:
+        return False
+
 def fs_close():
     global outfile_handle
     with file_lock:
@@ -104,17 +118,42 @@ def fs_close():
 def write_event(obj):
     global outfile_handle, _last_fsync
     if outfile_handle is None:
-        return
+        # Try to reopen the file if it was closed
+        try:
+            fs_open()
+        except Exception as e:
+            print(f"Failed to reopen output file: {e}")
+            return
+    
     line = json.dumps(obj, separators=(",", ":")) + "\n"
     with file_lock:
-        outfile_handle.write(line)
-        now = time.time()
-        if now - _last_fsync >= FSYNC_EVERY_SEC:
+        try:
+            outfile_handle.write(line)
+            now = time.time()
+            if now - _last_fsync >= FSYNC_EVERY_SEC:
+                try:
+                    os.fsync(outfile_handle.fileno())
+                except Exception as e:
+                    print(f"fsync failed, attempting to reopen file: {e}")
+                    # File handle is corrupted, try to recover
+                    try:
+                        fs_close()
+                        fs_open()
+                        outfile_handle.write(line)  # Retry writing the current line
+                    except Exception as recovery_e:
+                        print(f"File recovery failed: {recovery_e}")
+                        return
+                _last_fsync = now
+        except Exception as e:
+            print(f"Write failed, attempting to recover file handle: {e}")
+            # File handle is corrupted, try to recover
             try:
-                os.fsync(outfile_handle.fileno())
-            except Exception:
-                pass
-            _last_fsync = now
+                fs_close()
+                fs_open()
+                outfile_handle.write(line)  # Retry writing the current line
+            except Exception as recovery_e:
+                print(f"File recovery failed: {recovery_e}")
+                return
 
 def update_asset_mappings_from_api(force_update=False):
     global subs_version, previous_allowed_asset_ids
@@ -187,6 +226,21 @@ def markets_poll_loop():
             break
         fetch_markets_and_populate_data(initial=False)
 
+def file_health_monitor():
+    """Monitor file handle health and recover if needed."""
+    while not should_stop.is_set():
+        if should_stop.wait(30):  # Check every 30 seconds
+            break
+        
+        if not fs_health_check():
+            print("File handle health check failed - attempting recovery")
+            try:
+                fs_close()
+                fs_open()
+                print("File handle recovered successfully")
+            except Exception as e:
+                print(f"File handle recovery failed: {e}")
+
 def send_subscription(ws):
     global subscribed_asset_ids, is_first_subscription
     with data_lock:
@@ -194,21 +248,35 @@ def send_subscription(ws):
         new_ids = current_ids - subscribed_asset_ids
         removed_ids = subscribed_asset_ids - current_ids
 
+        print(f"Subscription check: current={len(current_ids)}, subscribed={len(subscribed_asset_ids)}, new={len(new_ids)}, removed={len(removed_ids)}, first={is_first_subscription}")
+
         if is_first_subscription or len(new_ids) + len(removed_ids) > max(1, int(len(current_ids) * 0.5)):
             sub = {"assets_ids": list(current_ids), "type": "market", "initial_dump": True}
-            ws.send(json.dumps(sub))
-            subscribed_asset_ids = current_ids.copy()
-            print(f"Full subscription to {len(current_ids)} asset IDs (initial_dump=True)")
-            is_first_subscription = False
+            try:
+                ws.send(json.dumps(sub))
+                subscribed_asset_ids = current_ids.copy()
+                print(f"Full subscription to {len(current_ids)} asset IDs (initial_dump=True)")
+                is_first_subscription = False
+            except Exception as e:
+                print(f"Failed to send subscription: {e}")
+                raise
         else:
             if new_ids:
                 sub = {"assets_ids": list(new_ids), "type": "market", "initial_dump": False}
-                ws.send(json.dumps(sub))
-                print(f"Subscribed to {len(new_ids)} new asset IDs (initial_dump=False)")
+                try:
+                    ws.send(json.dumps(sub))
+                    print(f"Subscribed to {len(new_ids)} new asset IDs (initial_dump=False)")
+                except Exception as e:
+                    print(f"Failed to send new subscription: {e}")
+                    raise
             if removed_ids:
                 unsub = {"assets_ids": list(removed_ids), "type": "market", "unsubscribe": True}
-                ws.send(json.dumps(unsub))
-                print(f"Unsubscribed from {len(removed_ids)} asset IDs")
+                try:
+                    ws.send(json.dumps(unsub))
+                    print(f"Unsubscribed from {len(removed_ids)} asset IDs")
+                except Exception as e:
+                    print(f"Failed to send unsubscription: {e}")
+                    raise
             subscribed_asset_ids = current_ids.copy()
             if not new_ids and not removed_ids:
                 print(f"No subscription changes needed ({len(current_ids)} assets)")
@@ -218,6 +286,16 @@ def on_open(ws):
     last_message_time = time.time()
     backoff = BACKOFF_MIN  # Reset backoff on successful connection
     print("WebSocket connected - reset backoff to minimum")
+    
+    # Proactively check and refresh file handle on reconnection
+    if not fs_health_check():
+        print("File handle unhealthy on reconnect - refreshing")
+        try:
+            fs_close()
+            fs_open()
+        except Exception as e:
+            print(f"Failed to refresh file handle on reconnect: {e}")
+    
     if not allowed_asset_ids:
         print("No allowed asset IDs; closing")
         ws.close()
@@ -235,6 +313,19 @@ def on_message(ws, msg):
     global last_message_time
     last_message_time = time.time()
     recv_ms = int(last_message_time * 1000)
+    
+    # Add periodic message count logging
+    if not hasattr(on_message, 'msg_count'):
+        on_message.msg_count = 0
+        on_message.last_log_time = time.time()
+    
+    on_message.msg_count += 1
+    
+    # Log message count every 100 messages or every 60 seconds
+    if on_message.msg_count % 100 == 0 or (time.time() - on_message.last_log_time) > 60:
+        print(f"Received {on_message.msg_count} WebSocket messages")
+        on_message.last_log_time = time.time()
+    
     try:
         if isinstance(msg, (bytes, bytearray)):
             try:
@@ -255,6 +346,7 @@ def on_message(ws, msg):
             return
 
         events = payload if isinstance(payload, list) else [payload]
+        events_written = 0
         for d in events:
             et = d.get("event_type", "unknown")
             aid = d.get("asset_id")
@@ -307,6 +399,12 @@ def on_message(ws, msg):
                 if k not in base:
                     base[k] = v
             write_event(base)
+            events_written += 1
+        
+        # Log first few events to see what we're getting
+        if on_message.msg_count <= 5:
+            print(f"Message {on_message.msg_count}: {len(events)} events, {events_written} written to file")
+            
     except Exception as e:
         print(f"on_message error: {e}")
 
@@ -403,6 +501,7 @@ def main():
     fs_open()
     fetch_markets_and_populate_data(initial=True)
     threading.Thread(target=markets_poll_loop, daemon=True).start()
+    threading.Thread(target=file_health_monitor, daemon=True).start()
 
     print("Starting WebSocket with persistent reconnect loop (no rel)...")
 
