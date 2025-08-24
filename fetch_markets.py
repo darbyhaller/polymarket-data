@@ -146,30 +146,37 @@ def extract_asset_mappings():
         if len(tokens) < 1:
             continue
             
-        # Get first token ID
-        first_token = (
-            tokens[0].get("token_id") or
-            tokens[0].get("clob_token_id") or
-            tokens[0].get("clobTokenId") or
-            tokens[0].get("id")
-        )
-        
-        if not first_token:
-            continue
-            
         # Use condition_id as market title
         title = condition_id
-        outcome = (tokens[0].get("outcome") or tokens[0].get("name") or "").title()
+        first_token_found = False
         
-        if title not in market_to_first_asset:
-            market_to_first_asset[title] = first_token
-            allowed_asset_ids.add(first_token)
-            asset_to_market[first_token] = title[:80]
+        # Process all tokens in the market
+        for token in tokens:
+            token_id = (
+                token.get("token_id") or
+                token.get("clob_token_id") or
+                token.get("clobTokenId") or
+                token.get("id")
+            )
+            
+            if not token_id:
+                continue
+                
+            outcome = (token.get("outcome") or token.get("name") or "").title()
+            
+            # Add to allowed assets
+            allowed_asset_ids.add(token_id)
+            asset_to_market[token_id] = title[:80]
             if outcome:
-                asset_outcome[first_token] = outcome
+                asset_outcome[token_id] = outcome
+                
+            # Track first valid token for this market
+            if not first_token_found:
+                market_to_first_asset[title] = token_id
+                first_token_found = True
     
     return {
-        'allowed_asset_ids': list(allowed_asset_ids),
+        'allowed_asset_ids': sorted(list(allowed_asset_ids)),
         'asset_to_market': asset_to_market,
         'asset_outcome': asset_outcome,
         'market_to_first_asset': market_to_first_asset

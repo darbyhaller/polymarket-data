@@ -126,12 +126,15 @@ def update_asset_mappings_from_api(force_update=False):
             # Store previous set for comparison
             previous_set = previous_allowed_asset_ids.copy()
             
+            # Convert to set for proper comparison (mappings returns a list)
+            new_asset_set = set(mappings['allowed_asset_ids'])
+            
             allowed_asset_ids.clear()
             asset_to_market.clear()
             asset_outcome.clear()
             market_to_first_asset.clear()
 
-            allowed_asset_ids.update(mappings['allowed_asset_ids'])
+            allowed_asset_ids.update(new_asset_set)
             asset_to_market.update(mappings['asset_to_market'])
             asset_outcome.update(mappings['asset_outcome'])
             market_to_first_asset.update(mappings['market_to_first_asset'])
@@ -145,6 +148,16 @@ def update_asset_mappings_from_api(force_update=False):
             print(f"Updated mappings: {mappings['total_markets']} total markets, "
                   f"{mappings['tradeable_markets']} tradeable, "
                   f"{len(allowed_asset_ids)} subscribed assets")
+            
+            # Debug logging to understand why assets_changed is True
+            if assets_changed:
+                added = allowed_asset_ids - previous_set
+                removed = previous_set - allowed_asset_ids
+                print(f"Assets changed: +{len(added)} added, -{len(removed)} removed")
+                if len(added) <= 10:
+                    print(f"Added assets: {list(added)}")
+                if len(removed) <= 10:
+                    print(f"Removed assets: {list(removed)}")
                   
         if assets_changed:
             with ws_lock:
@@ -155,6 +168,8 @@ def update_asset_mappings_from_api(force_update=False):
                 print(f"Market update: {abs(new_assets)} assets removed")
             else:
                 print(f"Market update: asset composition changed (same count)")
+        else:
+            print("No asset changes detected - skipping resubscription")
     except Exception as e:
         print(f"Error updating asset mappings: {e}")
     return max(0, new_assets)
@@ -330,7 +345,7 @@ def subs_refresher(ws):
 
 def watchdog(ws):
     """Force-close the socket if we haven't seen traffic for STALL_TIMEOUT seconds."""
-    while not should_stop.is_set() and getattr(ws, "sock", None) and ws.keep_running:
+    while not should_stop.is_set():
         if should_stop.wait(5):
             # Stop signal received, force close the websocket
             try:
@@ -338,13 +353,14 @@ def watchdog(ws):
             except:
                 pass
             break
-        if time.time() - last_message_time > STALL_TIMEOUT:
-            print(f"No data for {STALL_TIMEOUT}s — forcing reconnect")
-            try:
-                ws.close()  # triggers exit from run_forever
-            except:
-                pass
-            return
+        if getattr(ws, "sock", None) and ws.keep_running:
+            if time.time() - last_message_time > STALL_TIMEOUT:
+                print(f"No data for {STALL_TIMEOUT}s — forcing reconnect")
+                try:
+                    ws.close()  # triggers exit from run_forever
+                except:
+                    pass
+                return
 
 def handle_signal(signum, frame):
     print(f"Signal {signum}: stopping")
