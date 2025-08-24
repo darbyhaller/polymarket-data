@@ -10,6 +10,9 @@ import threading
 from threading import Lock, Event
 from websocket import WebSocketApp
 import random
+import os
+import signal
+import sys
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 OUTFILE = "orderbook_clip.jsonl"
@@ -20,7 +23,7 @@ CAPTURE_SECONDS = 3600 * 24 * 7 * 52  # adjust as needed
 TRADES_UPDATE_INTERVAL = 10  # seconds between trades API calls
 
 # WebSocket reconnection settings
-MAX_RECONNECT_ATTEMPTS = 50  # Maximum reconnection attempts
+MAX_RECONNECT_ATTEMPTS = 10**12  # effectively infinite
 RECONNECT_BASE_DELAY = 1  # Base delay for exponential backoff (seconds)
 RECONNECT_MAX_DELAY = 60  # Maximum delay between reconnection attempts
 CONNECTION_TIMEOUT = 30  # Connection timeout in seconds
@@ -32,6 +35,15 @@ ws_connected = Event()
 should_stop = Event()
 reconnect_count = 0
 last_message_time = None
+
+# Global WebSocket handle for forced reconnection
+current_ws = None
+ws_lock = Lock()
+
+# Subscription versioning for dynamic re-subscription
+subs_version = 0
+sent_version = -1
+subs_lock = Lock()
 
 # Asset ID to market title mapping and outcome mapping
 asset_to_market = {}
@@ -50,6 +62,10 @@ file_lock = Lock()
 
 # File handle for live writing
 outfile_handle = None
+
+# File sync settings
+FSYNC_EVERY_SEC = 1.0
+_last_fsync = time.time()
 
 def calculate_reconnect_delay(attempt):
     """Calculate exponential backoff delay with jitter."""
@@ -114,6 +130,10 @@ def fetch_markets_and_populate_data(initial_load=True):
             print(f"Populated {len(asset_outcome)} outcome labels")
         elif new_assets > 0:
             print(f"Updated: Found {new_assets} new allowed asset IDs (total: {len(allowed_asset_ids)})")
+            # Increment subscription version when new assets are found
+            with subs_lock:
+                global subs_version
+                subs_version += 1
             
     except Exception as e:
         print(f"Error fetching markets: {e}")
@@ -129,23 +149,38 @@ def periodic_trades_fetcher():
         except Exception as e:
             print(f"Error in periodic trades fetcher: {e}")
 
+def send_subscription(ws):
+    """Send subscription message with current allowed asset IDs."""
+    with data_lock:
+        ids = list(allowed_asset_ids)  # subscribe only to allowed (first per market)
+    sub = {"assets_ids": ids, "type": "market", "initial_dump": True}
+    ws.send(json.dumps(sub))
+    print(f"(Re)subscribed to {len(ids)} asset IDs")
+
 def write_event(e):
-    """Write event immediately to file."""
-    global outfile_handle
-    if outfile_handle:
-        with file_lock:
-            try:
-                outfile_handle.write(json.dumps(e) + "\n")
-                outfile_handle.flush()  # Ensure data is written immediately
-            except Exception as ex:
-                print(f"Error writing event to file: {ex}")
+    """Write event immediately to file with periodic fsync for durability."""
+    global outfile_handle, _last_fsync
+    if not outfile_handle:
+        return
+    
+    b = (json.dumps(e, separators=(",", ":")) + "\n").encode()
+    with file_lock:
+        try:
+            outfile_handle.write(b.decode())  # keep as text file
+            outfile_handle.flush()
+            now = time.time()
+            if now - _last_fsync >= FSYNC_EVERY_SEC:
+                os.fsync(outfile_handle.fileno())
+                _last_fsync = now
+        except Exception as ex:
+            print(f"Error writing event to file: {ex}")
 
 def on_message(ws, msg):
     global start_time, last_message_time
 
     try:
         last_message_time = time.time()
-        now_ms = int(time.time() * 1000)
+        recv_ms = int(time.time() * 1000)
         payload = json.loads(msg)
         events = payload if isinstance(payload, list) else [payload]
 
@@ -153,25 +188,25 @@ def on_message(ws, msg):
             et = data.get("event_type", "unknown")
             asset_id = data.get("asset_id", "unknown")
             
-            # Thread-safe access to allowed_asset_ids
+            # Thread-safe access to allowed_asset_ids and seen_hashes
             with data_lock:
                 is_allowed = asset_id in allowed_asset_ids
                 market_title = asset_to_market.get(asset_id, "")
                 outcome = asset_outcome.get(asset_id, "")
-            
-            # Skip events for asset_ids that are not the first seen for their market
-            if not is_allowed:
-                continue
-            
-            # Skip events with duplicate hashes
-            event_hash = data.get("hash")
-            if event_hash:
-                if event_hash in seen_hashes:
+                
+                # Skip events for asset_ids that are not the first seen for their market
+                if not is_allowed:
                     continue
-                seen_hashes.add(event_hash)
+                
+                # Skip events with duplicate hashes (thread-safe)
+                event_hash = data.get("hash")
+                if event_hash:
+                    if event_hash in seen_hashes:
+                        continue
+                    seen_hashes.add(event_hash)
                 
             base = {
-                "ts_ms": now_ms,
+                "recv_ts_ms": recv_ms,   # when we received it
                 "event_type": et,
                 "asset_id": asset_id,
                 "market": data.get("market"),
@@ -253,7 +288,7 @@ def on_close(ws, close_status_code, close_msg):
     ws_connected.clear()
 
 def on_open(ws):
-    global start_time, reconnect_count, last_message_time
+    global start_time, reconnect_count, last_message_time, sent_version
     
     if start_time is None:
         start_time = time.time()
@@ -266,17 +301,15 @@ def on_open(ws):
     else:
         print("WebSocket connected")
 
-    if not ASSET_IDS:
-        print("No asset IDs loaded. Exiting...")
+    if not allowed_asset_ids:
+        print("No allowed asset IDs loaded. Exiting...")
         ws.close()
         return
 
-    print(f"Subscribing to {len(ASSET_IDS)} asset IDs on Market channel...")
-    # As per docs, subscribe with assets_ids + type="market"
-    # (auth not required for Market channel)
-    # Explicitly request initial book dumps
-    sub = {"assets_ids": ASSET_IDS, "type": "market", "initial_dump": True}
-    ws.send(json.dumps(sub))
+    print(f"Subscribing to {len(allowed_asset_ids)} allowed asset IDs on Market channel...")
+    send_subscription(ws)
+    with subs_lock:
+        sent_version = subs_version
     print(f"Subscription sent. Capturing for ~{CAPTURE_SECONDS}s...")
     
     # Reset reconnect count on successful connection
@@ -293,8 +326,9 @@ def create_websocket():
     )
 
 def connection_monitor():
-    """Monitor connection health and trigger reconnection if needed."""
+    """Monitor connection health and force reconnection if needed."""
     global last_message_time
+    QUIET_SEC = 120
     
     while not should_stop.is_set():
         time.sleep(30)  # Check every 30 seconds
@@ -303,9 +337,17 @@ def connection_monitor():
             break
             
         # Check if we haven't received messages for too long
-        if last_message_time and (time.time() - last_message_time) > 120:  # 2 minutes
-            print("No messages received for 2 minutes, connection may be stale")
-            ws_connected.clear()
+        if last_message_time and (time.time() - last_message_time) > QUIET_SEC:
+            print(f"No messages for {QUIET_SEC}s — forcing reconnect")
+            with ws_lock:
+                if current_ws is not None:
+                    try:
+                        # this forces run_forever() to exit
+                        current_ws.keep_running = False
+                        current_ws.close()
+                    except Exception as e:
+                        print(f"Error forcing close: {e}")
+            last_message_time = time.time()  # avoid repeated spam
         
         # Check if capture time is exceeded
         if start_time and (time.time() - start_time) > CAPTURE_SECONDS:
@@ -353,8 +395,27 @@ def run_with_reconnection():
     # Clean shutdown
     save_and_exit(None)
 
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    print(f"\nReceived signal {signum}. Shutting down gracefully...")
+    should_stop.set()
+    # Force close current WebSocket if it exists
+    with ws_lock:
+        if current_ws is not None:
+            try:
+                current_ws.keep_running = False
+                current_ws.close()
+            except Exception:
+                pass
+    save_and_exit(None)
+    sys.exit(0)
+
 if __name__ == "__main__":
     print("Capturing Polymarket L2 order book data...")
+    
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     # Open file for live writing (append mode to preserve existing data)
     try:
