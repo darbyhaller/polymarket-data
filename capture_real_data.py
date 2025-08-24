@@ -151,9 +151,9 @@ def send_subscription(ws):
             is_first_subscription = False
         else:
             if new_ids:
-                sub = {"assets_ids": list(new_ids), "type": "market", "initial_dump": True}
+                sub = {"assets_ids": list(new_ids), "type": "market", "initial_dump": False}
                 ws.send(json.dumps(sub))
-                print(f"Subscribed to {len(new_ids)} new asset IDs (initial_dump=True)")
+                print(f"Subscribed to {len(new_ids)} new asset IDs (initial_dump=False)")
             if removed_ids:
                 unsub = {"assets_ids": list(removed_ids), "type": "market", "unsubscribe": True}
                 ws.send(json.dumps(unsub))
