@@ -1,6 +1,5 @@
 ## Pain Points
-* Gamma api isn't easy to turn into market_ids
-* Doesn't update markets/outcomes periodically
+Mark any time periods where there haven't been any websocket updates for ANY market for 1 second as "PRICE UNKNOWN" rather than assuming constant price
 
 ## Future Directions
 * Ground with search
