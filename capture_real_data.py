@@ -148,7 +148,29 @@ def on_message(ws, msg):
     recv_ms = int(last_message_time * 1000)
 
     try:
-        payload = json.loads(msg)
+        # Handle bytes → str conversion
+        if isinstance(msg, (bytes, bytearray)):
+            try:
+                msg = msg.decode("utf-8", errors="replace")
+            except Exception:
+                return  # skip un-decodable frames
+
+        s = msg.strip()
+        if not s:
+            return  # empty frame, ignore
+
+        # Some servers send non-JSON text like "pong" or "ok"
+        if s[0] not in "[{":
+            # low-noise one-line preview for debugging
+            print(f"Non-JSON text frame (ignored): {s[:120]!r}")
+            return
+
+        try:
+            payload = json.loads(s)
+        except json.JSONDecodeError as e:
+            print(f"JSON decode failed at pos {e.pos}: {s[:120]!r}")
+            return
+
         events = payload if isinstance(payload, list) else [payload]
         for d in events:
             et = d.get("event_type", "unknown")
@@ -206,6 +228,13 @@ def on_message(ws, msg):
     except Exception as e:
         print(f"on_message error: {e}")
 
+def on_data(ws, data, opcode, fin):
+    """Handle different WebSocket frame types, only process text frames."""
+    # OPCODE_TEXT = 0x1, only process text frames
+    if opcode == 0x1:
+        on_message(ws, data)
+    # Ignore binary, ping, pong, and other control frames silently
+
 def on_error(ws, err):
     print(f"WebSocket error: {err}")
 
@@ -251,6 +280,7 @@ def main():
         on_message=on_message,
         on_error=on_error,
         on_close=on_close,
+        on_data=on_data,  # Handle different frame types
     )
 
     # Note: rel handles reconnect automatically when reconnect>0
