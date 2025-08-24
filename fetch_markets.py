@@ -63,7 +63,7 @@ def fetch_markets_from_cursor(start_cursor=""):
             data = page.get("data", [])
             
             if not data:
-                return cursor  # no more data; return last next_cursor we tried
+                return cursor  # no more data; return last valid cursor
                 
             markets_fetched += len(data)
             print(f"Fetched page with {len(data)} markets (total: {markets_fetched})")
@@ -73,7 +73,7 @@ def fetch_markets_from_cursor(start_cursor=""):
             yield data, next_cursor
             
             if next_cursor == "LTE=":
-                return next_cursor
+                return cursor  # return the cursor we used for this page, not "LTE="
             cursor = next_cursor
                 
         except Exception as e:
@@ -108,7 +108,9 @@ def update_markets_cache(full_refresh=False):
                 new_markets += 1
                 
             markets_data[condition_id] = market
-        final_cursor = next_cursor  # advance to page's next_cursor
+        # Only advance cursor if it's not the end marker
+        if next_cursor != "LTE=":
+            final_cursor = next_cursor
     
     print(f"Update complete: {new_markets} new, {updated_markets} updated")
     save_cache(markets_data, final_cursor)
