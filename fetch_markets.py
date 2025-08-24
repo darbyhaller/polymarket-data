@@ -63,24 +63,22 @@ def fetch_markets_from_cursor(start_cursor=""):
             data = page.get("data", [])
             
             if not data:
-                break
+                return cursor  # no more data; return last next_cursor we tried
                 
             markets_fetched += len(data)
             print(f"Fetched page with {len(data)} markets (total: {markets_fetched})")
             
-            # Yield each market with cursor info
-            for market in data:
-                yield market, cursor
+            next_cursor = page.get("next_cursor") or "LTE="
+            # Yield the whole page with the next_cursor
+            yield data, next_cursor
             
-            cursor = page.get("next_cursor") or "LTE="
-            if cursor == "LTE=":
-                break
+            if next_cursor == "LTE=":
+                return next_cursor
+            cursor = next_cursor
                 
         except Exception as e:
             print(f"Error fetching markets: {e}")
-            break
-    
-    return cursor
+            return cursor
 
 def update_markets_cache(full_refresh=False):
     """Update the markets cache incrementally or do full refresh."""
@@ -98,18 +96,19 @@ def update_markets_cache(full_refresh=False):
     updated_markets = 0
     final_cursor = start_cursor
     
-    for market, cursor in fetch_markets_from_cursor(start_cursor):
-        condition_id = market.get("condition_id")
-        if not condition_id:
-            continue
-            
-        if condition_id in markets_data:
-            updated_markets += 1
-        else:
-            new_markets += 1
-            
-        markets_data[condition_id] = market
-        final_cursor = cursor
+    for data, next_cursor in fetch_markets_from_cursor(start_cursor):
+        for market in data:
+            condition_id = market.get("condition_id")
+            if not condition_id:
+                continue
+                
+            if condition_id in markets_data:
+                updated_markets += 1
+            else:
+                new_markets += 1
+                
+            markets_data[condition_id] = market
+        final_cursor = next_cursor  # advance to page's next_cursor
     
     print(f"Update complete: {new_markets} new, {updated_markets} updated")
     save_cache(markets_data, final_cursor)
