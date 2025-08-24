@@ -74,6 +74,7 @@ sent_version = -1
 should_stop = Event()
 last_message_time = 0.0
 is_first_subscription = True
+backoff = BACKOFF_MIN  # Global backoff state
 
 outfile_handle = None
 _last_fsync = 0.0
@@ -198,9 +199,10 @@ def send_subscription(ws):
                 print(f"No subscription changes needed ({len(current_ids)} assets)")
 
 def on_open(ws):
-    global sent_version, last_message_time, is_first_subscription
+    global sent_version, last_message_time, is_first_subscription, backoff
     last_message_time = time.time()
-    print("WebSocket connected")
+    backoff = BACKOFF_MIN  # Reset backoff on successful connection
+    print("WebSocket connected - reset backoff to minimum")
     if not allowed_asset_ids:
         print("No allowed asset IDs; closing")
         ws.close()
@@ -388,11 +390,12 @@ def main():
 
     print("Starting WebSocket with persistent reconnect loop (no rel)...")
 
-    backoff = BACKOFF_MIN
+    global backoff
     ws = None
     ws_thread = None
     
     while not should_stop.is_set():
+        connection_start_time = time.time()
         try:
             print("Creating new WebSocket connection...")
             ws = create_websocket()
@@ -417,6 +420,12 @@ def main():
                 except:
                     pass
                 break
+            
+            # Check if connection ran successfully for a reasonable duration
+            connection_duration = time.time() - connection_start_time
+            if connection_duration >= 30:  # Reset backoff if connection lasted at least 30 seconds
+                backoff = BACKOFF_MIN
+                print(f"Connection ran successfully for {connection_duration:.1f}s - reset backoff to {BACKOFF_MIN}s")
             
             # If we get here, the socket closed. Backoff and retry.
             print("Socket ended; backing off before reconnect...")
