@@ -27,6 +27,7 @@ file_lock = Lock()
 ws_lock = Lock()
 
 allowed_asset_ids = set()
+previous_allowed_asset_ids = set()
 asset_to_market = {}
 asset_outcome = {}
 market_to_first_asset = {}
@@ -80,12 +81,15 @@ def write_event(obj):
             _last_fsync = now
 
 def update_asset_mappings_from_api(force_update=False):
-    global subs_version
+    global subs_version, previous_allowed_asset_ids
     new_assets = 0
     try:
         mappings = get_tradeable_asset_mappings(force_update=force_update)
         with data_lock:
             old_size = len(allowed_asset_ids)
+            # Store previous set for comparison
+            previous_set = previous_allowed_asset_ids.copy()
+            
             allowed_asset_ids.clear()
             asset_to_market.clear()
             asset_outcome.clear()
@@ -97,17 +101,24 @@ def update_asset_mappings_from_api(force_update=False):
             market_to_first_asset.update(mappings['market_to_first_asset'])
 
             new_assets = len(allowed_asset_ids) - old_size
+            
+            # Check if the set composition changed, not just the size
+            assets_changed = allowed_asset_ids != previous_set
+            previous_allowed_asset_ids = allowed_asset_ids.copy()
 
             print(f"Updated mappings: {mappings['total_markets']} total markets, "
                   f"{mappings['tradeable_markets']} tradeable, "
                   f"{len(allowed_asset_ids)} subscribed assets")
-        if new_assets != 0:
+                  
+        if assets_changed:
             with ws_lock:
                 subs_version += 1
             if new_assets > 0:
                 print(f"Market update: +{new_assets} new assets")
-            else:
+            elif new_assets < 0:
                 print(f"Market update: {abs(new_assets)} assets removed")
+            else:
+                print(f"Market update: asset composition changed (same count)")
     except Exception as e:
         print(f"Error updating asset mappings: {e}")
     return max(0, new_assets)
