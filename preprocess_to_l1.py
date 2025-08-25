@@ -150,8 +150,11 @@ class L1Processor:
         best_bid, best_ask = self.extract_best_levels(bids, asks)
         
         # Create or update L1 quote
+        timestamp = event.get("timestamp") or event.get("ts_ms")
+        if timestamp is not None:
+            timestamp = int(timestamp)
         l1_quote = L1Quote(
-            ts_ms=event.get("ts_ms"),
+            ts_ms=timestamp,
             asset_id=asset_id,
             market=event.get("market", ""),
             market_title=event.get("market_title", ""),
@@ -227,7 +230,10 @@ class L1Processor:
                 continue
         
         if updated:
-            current_l1.ts_ms = event.get("ts_ms")
+            timestamp = event.get("timestamp") or event.get("ts_ms")
+            if timestamp is not None:
+                timestamp = int(timestamp)
+            current_l1.ts_ms = timestamp
             return current_l1
             
         return None
@@ -252,6 +258,12 @@ def preprocess_l2_to_l1(input_file: str, output_file: str):
     processor = L1Processor()
     events_processed = 0
     l1_updates = 0
+    no_network_events = 0
+    
+    # Track timestamps and network outage state
+    last_event_timestamp = None
+    in_network_outage = False
+    NETWORK_TIMEOUT_MS = 1000  # 1 second in milliseconds
     
     print(f"Processing L2 data from {input_file}...")
     
@@ -265,6 +277,47 @@ def preprocess_l2_to_l1(input_file: str, output_file: str):
                 try:
                     event = json.loads(line)
                     events_processed += 1
+                    current_timestamp = event.get("timestamp") or event.get("ts_ms")
+                    if current_timestamp is not None:
+                        current_timestamp = int(current_timestamp)
+                    
+                    event_type = event.get("event_type")
+                    
+                    # Skip "book" events for outage detection timing
+                    if event_type != "book":
+                        # Check for network outage (gap > 1 second since last event)
+                        if (last_event_timestamp is not None and
+                            current_timestamp is not None and
+                            current_timestamp - last_event_timestamp > NETWORK_TIMEOUT_MS):
+                            
+                            gap_duration = current_timestamp - last_event_timestamp
+                            print(f"DEBUG: Gap detected: {gap_duration}ms, in_outage: {in_network_outage}, last_ts: {last_event_timestamp}, curr_ts: {current_timestamp}")
+                            
+                            # Only write marker if we weren't already in an outage
+                            if not in_network_outage:
+                                print(f"DEBUG: Writing network outage marker for gap of {gap_duration}ms")
+                                # Write "no network event" marker
+                                no_network_marker = {
+                                    "ts_ms": last_event_timestamp + NETWORK_TIMEOUT_MS,
+                                    "event_type": "no_network_event",
+                                    "gap_duration_ms": gap_duration,
+                                    "message": "Network outage detected - no events received"
+                                }
+                                outfile.write(json.dumps(no_network_marker) + '\n')
+                                no_network_events += 1
+                            else:
+                                print(f"DEBUG: Skipping marker - already in outage state")
+                            # Stay in outage state until we see normal activity
+                            in_network_outage = True
+                        else:
+                            # Normal gap - we're out of outage state
+                            if in_network_outage:
+                                print(f"DEBUG: Exiting outage state - normal gap")
+                            in_network_outage = False
+                        
+                        # Update last event timestamp for next iteration (exclude book events)
+                        if current_timestamp is not None:
+                            last_event_timestamp = current_timestamp
                     
                     # Process event and get L1 update if any
                     l1_quote = processor.process_event(event)
@@ -275,7 +328,7 @@ def preprocess_l2_to_l1(input_file: str, output_file: str):
                         l1_updates += 1
                         
                         if l1_updates % 1000 == 0:
-                            print(f"Processed {events_processed} events, generated {l1_updates} L1 updates...")
+                            print(f"Processed {events_processed} events, generated {l1_updates} L1 updates, {no_network_events} network outage markers...")
                             
                 except json.JSONDecodeError as e:
                     print(f"JSON decode error on line {line_num}: {e}", file=sys.stderr)
@@ -294,6 +347,7 @@ def preprocess_l2_to_l1(input_file: str, output_file: str):
     print(f"Preprocessing complete!")
     print(f"Total events processed: {events_processed}")
     print(f"L1 updates generated: {l1_updates}")
+    print(f"Network outage markers added: {no_network_events}")
     print(f"Output written to: {output_file}")
 
 if __name__ == "__main__":
