@@ -63,17 +63,39 @@ ensure_bucket() {
   fi
 
   say "Applying lifecycle: Archive after $ARCHIVE_AFTER_DAYS days (never delete)"
-  cat > /tmp/lifecycle.json <<EOF
+
+  # Use YAML (gcloud handles this well)
+  cat > /tmp/lifecycle.yaml <<YAML
+rule:
+  - action:
+      type: SetStorageClass
+      storageClass: ARCHIVE
+    condition:
+      age: $ARCHIVE_AFTER_DAYS
+YAML
+
+  # Try with gcloud first
+  if gcloud storage buckets update "gs://$BUCKET" --lifecycle-file=/tmp/lifecycle.yaml; then
+    :
+  else
+    echo "gcloud lifecycle update failed — falling back to gsutil with JSON"
+    # Fallback: JSON + gsutil
+    cat > /tmp/lifecycle.json <<JSON
 {
   "rule": [
     {
-      "action": {"type": "SetStorageClass", "storageClass": "ARCHIVE"},
-      "condition": {"age": $ARCHIVE_AFTER_DAYS}
+      "action": { "type": "SetStorageClass", "storageClass": "ARCHIVE" },
+      "condition": { "age": $ARCHIVE_AFTER_DAYS }
     }
   ]
 }
-EOF
-  gcloud storage buckets update "gs://$BUCKET" --lifecycle-file=/tmp/lifecycle.json
+JSON
+    gsutil lifecycle set /tmp/lifecycle.json "gs://$BUCKET"
+  fi
+
+  # Verify
+  echo "Current lifecycle:"
+  gcloud storage buckets describe "gs://$BUCKET" --format=json | jq .lifecycle 2>/dev/null || gsutil lifecycle get "gs://$BUCKET"
 }
 
 #############################################
