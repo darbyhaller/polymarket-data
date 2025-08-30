@@ -188,6 +188,18 @@ else
   log "WARNING: No secondary disk detected. Ingest will still run, but without large local buffer."
 fi
 
+log "Setting up swap"
+SWAPFILE="$MOUNT_POINT/swapfile"
+if [ ! -f "$SWAPFILE" ]; then
+  fallocate -l 2G "$SWAPFILE"
+  chmod 600 "$SWAPFILE"
+  mkswap "$SWAPFILE"
+  echo "$SWAPFILE none swap sw 0 0" >> /etc/fstab
+fi
+swapon -a
+log "Swap enabled:"
+free -h
+
 log "Prepare app dir & venv"
 mkdir -p "$APP_DIR"
 cd "$APP_DIR"
