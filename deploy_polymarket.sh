@@ -214,6 +214,9 @@ else
   git pull --ff-only || true
 fi
 
+sudo chown -R "$USER":"$USER" /opt/polymarket
+git config --global --add safe.directory /opt/polymarket
+
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
