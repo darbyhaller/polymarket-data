@@ -6,6 +6,7 @@ from threading import Lock, Event
 from datetime import datetime
 from collections import deque
 from fetch_markets import get_tradeable_asset_mappings
+from writer import write_event
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
@@ -114,46 +115,6 @@ def fs_close():
             except Exception:
                 pass
             outfile_handle = None
-
-def write_event(obj):
-    global outfile_handle, _last_fsync
-    if outfile_handle is None:
-        # Try to reopen the file if it was closed
-        try:
-            fs_open()
-        except Exception as e:
-            print(f"Failed to reopen output file: {e}")
-            return
-    
-    line = json.dumps(obj, separators=(",", ":")) + "\n"
-    with file_lock:
-        try:
-            outfile_handle.write(line)
-            now = time.time()
-            if now - _last_fsync >= FSYNC_EVERY_SEC:
-                try:
-                    os.fsync(outfile_handle.fileno())
-                except Exception as e:
-                    print(f"fsync failed, attempting to reopen file: {e}")
-                    # File handle is corrupted, try to recover
-                    try:
-                        fs_close()
-                        fs_open()
-                        outfile_handle.write(line)  # Retry writing the current line
-                    except Exception as recovery_e:
-                        print(f"File recovery failed: {recovery_e}")
-                        return
-                _last_fsync = now
-        except Exception as e:
-            print(f"Write failed, attempting to recover file handle: {e}")
-            # File handle is corrupted, try to recover
-            try:
-                fs_close()
-                fs_open()
-                outfile_handle.write(line)  # Retry writing the current line
-            except Exception as recovery_e:
-                print(f"File recovery failed: {recovery_e}")
-                return
 
 def update_asset_mappings_from_api(force_update=False):
     global subs_version, previous_allowed_asset_ids
