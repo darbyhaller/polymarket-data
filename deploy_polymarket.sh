@@ -95,7 +95,7 @@ JSON
 
   # Verify
   echo "Current lifecycle:"
-  gcloud storage buckets describe "gs://$BUCKET" --format=json | jq .lifecycle 2>/dev/null || gsutil lifecycle get "gs://$BUCKET"
+  gsutil lifecycle get gs://polymarket-raw-polymarket-470619
 }
 
 #############################################
@@ -255,9 +255,9 @@ SYNCUNIT
 
 cat >/etc/systemd/system/polymarket-sync.timer <<SYNCTIMER
 [Unit]
-Description=Run GCS sync hourly
+Description=Run GCS sync hourly, offset by 5 minutes
 [Timer]
-OnCalendar=hourly
+OnCalendar=*:05
 Persistent=true
 [Install]
 WantedBy=timers.target

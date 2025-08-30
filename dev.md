@@ -2,8 +2,12 @@
 
 ## 🔑 Quick Cheat Sheet (Most Used Commands)
 
-### Creation Chat
-[ChatGPT](https://chatgpt.com/c/68b34acb-76e4-8320-9783-e8ae2299c4b3)
+### One-time env vars (in any shell)
+```bash
+PROJECT=$(gcloud config get-value project)
+BUCKET="polymarket-raw-$PROJECT"
+echo "Using bucket: gs://$BUCKET"
+```
 
 ### Restart capture service & watch logs
 ```bash
@@ -11,10 +15,24 @@ sudo systemctl restart polymarket
 journalctl -u polymarket -f
 ```
 
-### Peek latest 5 events in GCS
-```bash
+### Peek latest 5 events in GCS (zsh-safe, newest lines)
+```zsh
+setopt noglob
 LATEST=$(gcloud storage ls -r gs://$BUCKET/raw/year=*/month=*/day=*/hour=*/events-*.jsonl.gz | tail -n1)
-gcloud storage cat "$LATEST" | gunzip -c | head -n 5
+unsetopt noglob
+gcloud storage cat "$LATEST" | gunzip -c | \
+python3 - <<'PYCODE'
+import sys, json
+from collections import deque
+buf = deque(maxlen=5)
+for line in sys.stdin:
+    buf.append(line)
+for line in buf:
+    try:
+        print(json.dumps(json.loads(line), indent=2))
+    except Exception:
+        print(line.strip())
+PYCODE
 ```
 
 ### Download yesterday's data locally
@@ -41,9 +59,14 @@ gcloud config list --format="value(core.account, core.project)"
 
 ## 1. VM + Disk
 
-- **VM**: e2-standard-1 in us-central1-a
+- **VM**: custom 1 vCPU / 4 GB RAM in us-central1-a
 - **Data disk**: 200 GB mounted at `/var/data/polymarket`
 - **Code**: `/opt/polymarket` (Git repo + venv)
+
+**Tip**: set defaults so you don't need `--zone` each time:
+```bash
+gcloud config set compute/zone us-central1-a
+```
 
 ## 2. Git Workflow
 
@@ -55,6 +78,11 @@ cd polymarket
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+If using the HTTPS URL instead of SSH, use:
+```bash
+git clone https://github.com/youruser/polymarket.git
 ```
 
 ### Deploy changes
@@ -82,13 +110,23 @@ systemctl list-timers | grep polymarket-sync
 journalctl -u polymarket-sync.service --since "6 hours ago" --no-pager
 ```
 
+### Cleanup (`polymarket-clean.timer`)
+Runs daily → deletes local `.jsonl.gz` older than 3 days (skips current UTC hour).
+
+```bash
+systemctl list-timers | grep polymarket-clean
+journalctl -u polymarket-clean.service --since "2 days ago" --no-pager
+```
+
 ## 4. GCS Lifecycle
 
 Objects transition to **ARCHIVE** after 365 days, never deleted.
 
 ### Check lifecycle policy
 ```bash
-gsutil lifecycle get gs://polymarket-raw-<PROJECT>
+gsutil lifecycle get gs://polymarket-raw-$PROJECT
+# or
+gcloud storage buckets describe gs://polymarket-raw-$PROJECT --format=json | jq .lifecycle
 ```
 
 ## 5. Inspecting Data
@@ -98,14 +136,13 @@ gsutil lifecycle get gs://polymarket-raw-<PROJECT>
 LATEST=$(gcloud storage ls -r gs://$BUCKET/raw/year=*/month=*/day=*/hour=*/events-*.jsonl.gz | tail -n1)
 ```
 
-### Preview events
+### Preview events (safe pretty-print per line)
 ```bash
-gcloud storage cat "$LATEST" | gunzip -c | head -n 5
-```
-
-### Pretty-print with jq
-```bash
-gcloud storage cat "$LATEST" | gunzip -c | head -n 5 | jq .
+gcloud storage cat "$LATEST" | gunzip -c | \
+python3 -c 'import sys, json
+from itertools import islice
+for line in islice(sys.stdin, 5):
+    print(json.dumps(json.loads(line), indent=2))'
 ```
 
 ### Count lines
@@ -163,4 +200,17 @@ df -h /var/data/polymarket
 ### Sync logs
 ```bash
 journalctl -u polymarket-sync.service -n 20 --no-pager
+```
+
+## 9. Forcing a Sync to GCS (debugging)
+
+Normally the sync runs hourly via `polymarket-sync.timer`.  
+To force it right now:
+
+```bash
+# Run the sync service manually
+sudo systemctl start polymarket-sync.service
+
+# Or call the sync script directly
+/usr/local/bin/sync_to_gcs.sh
 ```
