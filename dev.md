@@ -2,6 +2,9 @@
 
 ## 🔑 Quick Cheat Sheet (Most Used Commands)
 
+### Creation Chat
+[ChatGPT](https://chatgpt.com/c/68b34acb-76e4-8320-9783-e8ae2299c4b3)
+
 ### Restart capture service & watch logs
 ```bash
 sudo systemctl restart polymarket
