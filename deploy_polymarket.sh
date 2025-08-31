@@ -214,7 +214,7 @@ else
   git pull --ff-only || true
 fi
 
-sudo chown -R "$USER":"$USER" /opt/polymarket
+chown -R ${SUDO_USER:-$USER}:${SUDO_USER:-$USER} "$APP_DIR"
 git config --global --add safe.directory /opt/polymarket
 
 python3 -m venv .venv
