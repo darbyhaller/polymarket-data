@@ -369,12 +369,8 @@ def preprocess_l2_to_l1_batch(input_files: List[str], output_writer: Union[str, 
                             event = json.loads(line)
                             events_processed += 1
                             
-                            # Use recv_ts_ms if available, otherwise timestamp or ts_ms
-                            current_timestamp = (event.get("recv_ts_ms") or
-                                               event.get("timestamp") or
-                                               event.get("ts_ms"))
-                            if current_timestamp is not None:
-                                current_timestamp = int(current_timestamp)
+                            current_timestamp = event.get("timestamp")
+                            current_timestamp = int(current_timestamp)
                             
                             event_type = event.get("event_type")
                             
