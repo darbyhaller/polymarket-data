@@ -43,7 +43,6 @@ import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import DefaultDict, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
@@ -51,9 +50,29 @@ from typing import DefaultDict, Dict, Iterable, Iterator, List, Optional, Tuple,
 from writer import RotatingGzipWriter
 
 # ---------------------------
+# Micro-price conversion utilities
+# ---------------------------
+SCALE = 1_000_000
+
+def p_to_u(s: Optional[str]) -> Optional[int]:
+    """Convert price string to integer micro-units (fast path for short numeric strings)."""
+    if s is None:
+        return None
+    # Fast path; relies on short numeric strings
+    try:
+        return int(round(float(s) * SCALE))
+    except (ValueError, TypeError):
+        return None
+
+def u_to_s(u: Optional[int]) -> Optional[str]:
+    """Convert integer micro-units back to price string."""
+    if u is None:
+        return None
+    return f"{u / SCALE:.6f}"
+
+# ---------------------------
 # Data classes / L1 processor
 # ---------------------------
-ONE = Decimal("1")
 
 @dataclass
 class L1Quote:
@@ -62,63 +81,39 @@ class L1Quote:
     market: str
     market_title: str
     outcome: str
-    best_bid_price: Optional[str] = None
-    best_bid_size: Optional[str] = None
-    best_ask_price: Optional[str] = None
-    best_ask_size: Optional[str] = None
+    # Store prices as integer micro-units internally
+    best_bid_u: Optional[int] = None
+    best_ask_u: Optional[int] = None
+    best_bid_sz: Optional[str] = None
+    best_ask_sz: Optional[str] = None
 
     def to_dict(self) -> Dict:
-        should_flip = self.outcome.lower() in ["down", "no"]
-        if should_flip and self.best_bid_price and self.best_ask_price:
-            try:
-                original_bid = Decimal(self.best_bid_price)
-                original_ask = Decimal(self.best_ask_price)
-                flipped_bid_price = str(ONE - original_ask)
-                flipped_ask_price = str(ONE - original_bid)
-                flipped_bid_size = self.best_ask_size
-                flipped_ask_size = self.best_bid_size
-            except Exception:
-                flipped_bid_price = self.best_bid_price
-                flipped_ask_price = self.best_ask_price
-                flipped_bid_size = self.best_bid_size
-                flipped_ask_size = self.best_ask_size
+        flip = self.outcome.lower() in ("down", "no")
+        bu, au = self.best_bid_u, self.best_ask_u
+        if flip and bu is not None and au is not None:
+            bu2 = SCALE - au
+            au2 = SCALE - bu
+            bsz, asz = self.best_ask_sz, self.best_bid_sz
         else:
-            flipped_bid_price = self.best_bid_price
-            flipped_ask_price = self.best_ask_price
-            flipped_bid_size = self.best_bid_size
-            flipped_ask_size = self.best_ask_size
-
+            bu2, au2 = bu, au
+            bsz, asz = self.best_bid_sz, self.best_ask_sz
+        
+        spread = u_to_s(au2 - bu2) if (bu2 is not None and au2 is not None) else None
+        mid = u_to_s((au2 + bu2)//2) if (bu2 is not None and au2 is not None) else None
+        
         return {
             "ts_ms": self.ts_ms,
             "asset_id": self.asset_id,
             "market": self.market,
             "market_title": self.market_title,
             "outcome": self.outcome,
-            "best_bid_price": flipped_bid_price,
-            "best_bid_size": flipped_bid_size,
-            "best_ask_price": flipped_ask_price,
-            "best_ask_size": flipped_ask_size,
-            "spread": self._spread(flipped_bid_price, flipped_ask_price),
-            "mid_price": self._mid(flipped_bid_price, flipped_ask_price),
+            "best_bid_price": u_to_s(bu2),
+            "best_bid_size": bsz,
+            "best_ask_price": u_to_s(au2),
+            "best_ask_size": asz,
+            "spread": spread,
+            "mid_price": mid,
         }
-
-    @staticmethod
-    def _spread(bid_price: Optional[str], ask_price: Optional[str]) -> Optional[str]:
-        if bid_price and ask_price:
-            try:
-                return str(Decimal(ask_price) - Decimal(bid_price))
-            except Exception:
-                return None
-        return None
-
-    @staticmethod
-    def _mid(bid_price: Optional[str], ask_price: Optional[str]) -> Optional[str]:
-        if bid_price and ask_price:
-            try:
-                return str((Decimal(ask_price) + Decimal(bid_price)) / 2)
-            except Exception:
-                return None
-        return None
 
 class L1Processor:
     def __init__(self) -> None:
@@ -126,18 +121,9 @@ class L1Processor:
 
     @staticmethod
     def _best_levels(bids: List[Dict], asks: List[Dict]) -> Tuple[Optional[Dict], Optional[Dict]]:
-        best_bid = None
-        best_ask = None
-        if bids:
-            try:
-                best_bid = max(bids, key=lambda x: Decimal(x.get("price", "0")))
-            except Exception:
-                best_bid = bids[0]
-        if asks:
-            try:
-                best_ask = min(asks, key=lambda x: Decimal(x.get("price", "999999")))
-            except Exception:
-                best_ask = asks[0]
+        # choose by float once, but store as ints:
+        best_bid = max(bids, key=lambda x: float(x.get("price", "0"))) if bids else None
+        best_ask = min(asks, key=lambda x: float(x.get("price", "1e9"))) if asks else None
         return best_bid, best_ask
 
     def process_book(self, ev: Dict) -> Optional[L1Quote]:
@@ -159,11 +145,11 @@ class L1Processor:
             outcome=ev.get("outcome", ""),
         )
         if best_bid:
-            q.best_bid_price = best_bid.get("price")
-            q.best_bid_size = best_bid.get("size")
+            q.best_bid_u = p_to_u(best_bid.get("price"))
+            q.best_bid_sz = best_bid.get("size")
         if best_ask:
-            q.best_ask_price = best_ask.get("price")
-            q.best_ask_size = best_ask.get("size")
+            q.best_ask_u = p_to_u(best_ask.get("price"))
+            q.best_ask_sz = best_ask.get("size")
         self.l1_state[asset_id] = q
         return q
 
@@ -180,33 +166,26 @@ class L1Processor:
             size = ch.get("size")
             if not price or not side:
                 continue
-            try:
-                p = Decimal(price)
-                s = Decimal(size) if size else Decimal("0")
-                if side == "buy":
-                    cur = Decimal(q.best_bid_price) if q.best_bid_price else Decimal("0")
-                    if p >= cur:
-                        if s > 0:
-                            q.best_bid_price = price
-                            q.best_bid_size = size
-                            updated = True
-                        elif p == cur:
-                            q.best_bid_price = None
-                            q.best_bid_size = None
-                            updated = True
-                elif side == "sell":
-                    cur = Decimal(q.best_ask_price) if q.best_ask_price else Decimal("999999")
-                    if p <= cur:
-                        if s > 0:
-                            q.best_ask_price = price
-                            q.best_ask_size = size
-                            updated = True
-                        elif p == cur:
-                            q.best_ask_price = None
-                            q.best_ask_size = None
-                            updated = True
-            except Exception:
-                continue
+            p = p_to_u(price)
+            s_pos = (size is not None and float(size) > 0.0)
+            if side == "buy":
+                cur = q.best_bid_u or -1
+                if p is not None and p >= cur:
+                    if s_pos:
+                        q.best_bid_u, q.best_bid_sz = p, size
+                        updated = True
+                    elif p == cur:
+                        q.best_bid_u, q.best_bid_sz = None, None
+                        updated = True
+            elif side == "sell":
+                cur = q.best_ask_u if q.best_ask_u is not None else 10**15
+                if p is not None and p <= cur:
+                    if s_pos:
+                        q.best_ask_u, q.best_ask_sz = p, size
+                        updated = True
+                    elif p == cur:
+                        q.best_ask_u, q.best_ask_sz = None, None
+                        updated = True
         if updated:
             t = ev.get("timestamp") or ev.get("ts_ms")
             if t is not None:
