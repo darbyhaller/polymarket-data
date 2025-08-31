@@ -34,7 +34,7 @@ Notes
 import argparse
 import gzip
 import heapq
-import json
+import orjson as json
 import os
 import sys
 import glob
