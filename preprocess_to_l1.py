@@ -257,20 +257,35 @@ def dumps_text(obj) -> str:
     return json.dumps(obj).decode("utf-8")
 
 
+def _find_int_after(tag: str, s: str):
+    """Fast string scanning to find integer value after a JSON tag."""
+    i = s.find(tag)
+    if i < 0:
+        return None
+    i += len(tag)
+    while i < len(s) and s[i] in " \t:":
+        i += 1
+    j = i
+    while j < len(s) and s[j].isdigit():
+        j += 1
+    return int(s[i:j]) if j > i else None
+
+def _find_str_after(tag: str, s: str):
+    """Fast string scanning to find string value after a JSON tag."""
+    i = s.find(tag)
+    if i < 0:
+        return None
+    i = s.find('"', i) + 1
+    j = s.find('"', i)
+    return s[i:j] if (i > 0 and j > i) else None
+
 def extract_key_ts(line: str, key_field: Optional[str]) -> Optional[Tuple[str, int]]:
-    try:
-        ev = json.loads(line)
-    except json.JSONDecodeError:
+    """Extract just ts_ms/timestamp and the key with string scanning (fast on short lines)."""
+    ts = _find_int_after('"ts_ms"', line) or _find_int_after('"timestamp"', line)
+    if ts is None:
         return None
-    t = ev.get("timestamp") or ev.get("ts_ms")
-    if t is None:
-        return None
-    k = ev.get(key_field) if key_field else "GLOBAL"
-    try:
-        ts = int(t)
-    except Exception:
-        return None
-    return (str(k) if k is not None else "GLOBAL", ts)
+    k = "GLOBAL" if not key_field else (_find_str_after(f'"{key_field}"', line) or "GLOBAL")
+    return (k, ts)
 
 
 def write_sorted_chunk(tmpdir: str, chunk: List[ChunkRecord], idx: int) -> str:
@@ -364,6 +379,7 @@ def merge_and_process(
     writer_outages: Optional[Union[RotatingGzipWriter, str]],
     interleave_outages: bool,
     verbose: bool = False,
+    emit_iso: bool = False,
 ) -> Tuple[int, int, int]:
     """K-way merge the sorted chunks; emit L1 updates and outages in order.
     Returns: (events_read, l1_updates, outages)
@@ -536,6 +552,7 @@ def main():
     parser.add_argument('--chunk-max-records', type=int, default=500_000, help='Max records per chunk before sort spill')
     parser.add_argument('--chunk-max-mb', type=int, default=256, help='Approx MB per chunk before sort spill')
     parser.add_argument('--verbose', action='store_true', help='Verbose logging (prints outages)')
+    parser.add_argument('--emit-iso', action='store_true', help='Emit ISO timestamps on outages (default off for performance)')
 
     args = parser.parse_args()
 
