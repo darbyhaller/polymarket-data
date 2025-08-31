@@ -437,7 +437,7 @@ def main():
     parser.add_argument('input', help='Input file or directory path')
     parser.add_argument('output', nargs='?', help='Output file (omit if using --cloud-output)')
     parser.add_argument('--cloud-output', metavar='DIR', help='Write via RotatingGzipWriter to directory')
-    parser.add_argument('--key-field', default='asset_id', help='Stream key field; leave empty for GLOBAL')
+    parser.add_argument('--key-field', default='', help='Stream key field; leave empty for GLOBAL')
     parser.add_argument('--gap-threshold-seconds', type=float, default=1.0, help='Gap threshold for outages')
     parser.add_argument('--outages-output', help='Separate outages output file; if omitted, interleave into main output')
     parser.add_argument('--chunk-max-records', type=int, default=500_000, help='Max records per chunk before sort spill')
