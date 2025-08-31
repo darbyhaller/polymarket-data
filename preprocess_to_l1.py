@@ -237,10 +237,22 @@ def discover_input_files(input_path: str) -> List[str]:
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
     if os.path.isdir(input_path):
-        pattern = os.path.join(input_path, "year=*", "month=*", "day=*", "hour=*", "events-*.jsonl.gz")
-        files.extend(glob.glob(pattern))
+        # Look for files directly in the specified directory
         for ext in ["*.jsonl", "*.jsonl.gz"]:
             files.extend(glob.glob(os.path.join(input_path, ext)))
+        
+        # Look for files with events-* pattern directly in the specified directory
+        for ext in ["events-*.jsonl", "events-*.jsonl.gz"]:
+            files.extend(glob.glob(os.path.join(input_path, ext)))
+        
+        # Recursively search for partitioned files in subdirectories
+        # This handles any granularity: year=*, month=*, day=*, hour=*, etc.
+        for root, dirs, filenames in os.walk(input_path):
+            for filename in filenames:
+                if (filename.endswith('.jsonl') or filename.endswith('.jsonl.gz')) and \
+                   (filename.startswith('events-') or filename.endswith('.jsonl') or filename.endswith('.jsonl.gz')):
+                    files.append(os.path.join(root, filename))
+    
     files.sort()
     if not files:
         raise FileNotFoundError(f"No input files found in: {input_path}")
