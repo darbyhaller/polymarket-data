@@ -7,7 +7,7 @@ ZONE="${ZONE:-us-central1-a}"          # VM zone
 SIZE_GB="${SIZE_GB:-373}"              # desired PD-SSD size if we must create
 DISK_PREFIX="${DISK_PREFIX:-scratch-ssd-}"
 TMP_MNT="${TMP_MNT:-/mnt/scratch}"
-PY_CMD='/opt/polymarket/.venv/bin/python /opt/polymarket/preprocess_to_l1.py /var/data/polymarket/year=2025/month=08/day=31 --cloud-output /var/data/polymarket/l1 --verbose'
+PY_CMD='/opt/polymarket/.venv/bin/python /opt/polymarket/preprocess_to_l1.py /var/data/polymarket/year=2025/month=08/day=31/hour=00 --cloud-output /var/data/polymarket/l1 --verbose'
 
 # If you also want to delete a reused scratch disk on failure, set:
 DELETE_EXISTING_ON_FAILURE="${DELETE_EXISTING_ON_FAILURE:-0}"
@@ -154,7 +154,7 @@ sudo chown \"\$USER\":\"\$USER\" \"\$TMP_MNT\"
 df -h \"\$TMP_MNT\"
 
 echo Running job with TMPDIR=\$TMP_MNT ...
-sudo systemd-run --wait --collect --setenv=TMPDIR=\"\$TMP_MNT\" \
+sudo systemd-run --wait --collect --pty --setenv=TMPDIR=\"\$TMP_MNT\" \
   -p MemoryMax=2G -p MemorySwapMax=0 \
   \$PY_CMD
 
