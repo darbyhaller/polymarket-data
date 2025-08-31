@@ -83,7 +83,7 @@ fi
 USERS="$(gcloud compute disks describe "$DISK" --zone "$ZONE" --format='value(users)' || true)"
 if [[ -z "$USERS" ]]; then
   echo "Attaching $DISK to $INST..."
-  gcloud compute instances attach-disk "$INST" --disk "$DISK" --zone "$ZONE" --quiet
+  gcloud compute instances attach-disk "$INST" --disk "$DISK" --zone "$ZONE" --quiet --device-name "$DISK"
   ATTACHED_BY_US=1
 else
   if grep -q "/instances/${INST}$" <<<"$USERS"; then
@@ -97,71 +97,77 @@ else
 fi
 
 # 3) Prepare FS, mount, run job (remote)
-gcloud compute ssh "$INST" --zone "$ZONE" --command "bash -lc 'set -euo pipefail
-DISK=\"$DISK\"
-TMP_MNT=\"$TMP_MNT\"
-PY_CMD=\"$PY_CMD\"
+echo "[local] preparing remote runner..."
+REMOTE_TMP="/tmp/run_preprocess_remote.$(date +%s).sh"
 
-# Wait for device to appear and find the actual device path
-echo \"Waiting for disk \$DISK to be available...\"
-for i in {1..30}; do
-  # First try the by-id paths
-  if DEV=\$(ls /dev/disk/by-id/google-\$DISK 2>/dev/null); then
-    echo \"Found device via google-\$DISK: \$DEV\"
+# write the remote script locally (single-quoted heredoc: no local expansion)
+cat > /tmp/_remote_runner.sh <<'REMOTE'
+#!/usr/bin/env bash
+set -euo pipefail
+set -x
+PS4='+ remote:${LINENO}: '
+
+: "${DISK:?missing DISK}"
+: "${TMP_MNT:?missing TMP_MNT}"
+: "${PY_CMD:?missing PY_CMD}"
+
+echo "[remote] env: DISK=${DISK} TMP_MNT=${TMP_MNT}"
+sudo udevadm settle || true
+
+DEV=""
+for i in {1..60}; do
+  if [[ -e "/dev/disk/by-id/google-${DISK}" ]]; then
+    DEV="$(readlink -f "/dev/disk/by-id/google-${DISK}")"
+    echo "[remote] found by device-name: ${DEV}"
     break
-  elif DEV=\$(ls /dev/disk/by-id/scsi-0Google_PersistentDisk_\$DISK 2>/dev/null); then
-    echo \"Found device via scsi path: \$DEV\"
-    break
-  else
-    # Find the most recent google-persistent-disk that points to an unformatted device
-    DEV=\$(ls -t /dev/disk/by-id/google-persistent-disk-* 2>/dev/null | head -1)
-    if [[ -n \"\$DEV\" ]]; then
-      # Check if this device has no filesystem (newly attached)
-      if ! sudo blkid \"\$DEV\" >/dev/null 2>&1; then
-        echo \"Found newest unformatted device: \$DEV\"
-        break
-      fi
+  fi
+  cand=$(ls -t /dev/disk/by-id/google-persistent-disk-* 2>/dev/null | head -1 || true)
+  if [[ -n "${cand}" ]]; then
+    real="$(readlink -f "${cand}")"
+    if ! findmnt -S "${real}" >/dev/null 2>&1; then
+      DEV="${real}"
+      echo "[remote] fallback candidate: ${cand} -> ${DEV}"
+      break
     fi
-    sleep 2
   fi
-  if [[ \$i -eq 30 ]]; then
-    echo \"Error: Disk device not found after 60 seconds.\"
-    echo \"Available Google devices:\"
-    ls -la /dev/disk/by-id/google-* 2>/dev/null || true
-    echo \"Block devices:\"
-    lsblk || true
-    exit 1
-  fi
+  sleep 2
 done
-echo \"Using device: \$DEV\"
 
-# Install mkfs.ext4 if missing
-if ! command -v mkfs.ext4 >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y e2fsprogs;
-  elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y e2fsprogs;
-  elif command -v yum >/dev/null 2>&1; then sudo yum install -y e2fsprogs;
-  else echo Need e2fsprogs >&2; exit 1; fi
+if [[ -z "${DEV}" ]]; then
+  echo "[remote] ERROR: disk not found after 120s"
+  ls -la /dev/disk/by-id/google-* || true
+  lsblk -f || true
+  exit 1
+fi
+echo "[remote] using device: ${DEV}"
+
+FSTYPE="$(lsblk -no FSTYPE "${DEV}" | tr -d '[:space:]' || true)"
+if [[ -z "${FSTYPE}" ]]; then
+  echo "[remote] mkfs.ext4 on ${DEV}"
+  mkfs.ext4 -F -m1 -E lazy_itable_init=0,lazy_journal_init=0 "${DEV}"
 fi
 
-# Only mkfs if no FS (avoid wiping)
-if ! sudo blkid \"\$DEV\" >/dev/null 2>&1; then
-  sudo mkfs.ext4 -F -m1 -E lazy_itable_init=0,lazy_journal_init=0 \"\$DEV\"
+mkdir -p "${TMP_MNT}"
+if ! findmnt "${TMP_MNT}" >/dev/null 2>&1; then
+  mount -o noatime,nodiratime "${DEV}" "${TMP_MNT}"
 fi
+chown "${SUDO_USER:-$USER}:${SUDO_USER:-$USER}" "${TMP_MNT}" || true
+df -h "${TMP_MNT}" || true
 
-sudo mkdir -p \"\$TMP_MNT\"
-sudo mount \"\$DEV\" \"\$TMP_MNT\" || true
-sudo chown \"\$USER\":\"\$USER\" \"\$TMP_MNT\"
-df -h \"\$TMP_MNT\"
-
-echo Running job with TMPDIR=\$TMP_MNT ...
-sudo systemd-run --wait --collect --pty --setenv=TMPDIR=\"\$TMP_MNT\" \
+echo "[remote] running job with TMPDIR=${TMP_MNT}"
+systemd-run --wait --collect --pty --setenv=TMPDIR="${TMP_MNT}" \
   -p MemoryMax=2G -p MemorySwapMax=0 \
-  \$PY_CMD
+  ${PY_CMD}
 
-echo Job complete on VM.
-'"
+echo "[remote] job complete."
+REMOTE
 
-echo "Success path completed."
-# Normal exit will still hit trap/cleanup:
-# - detach (if we attached)
-# - delete if we created
+# ship it to the VM and run it
+gcloud compute scp --zone "$ZONE" /tmp/_remote_runner.sh "$INST:$REMOTE_TMP"
+rm -f /tmp/_remote_runner.sh
+
+echo "[local] executing remote runner..."
+gcloud compute ssh "$INST" --zone "$ZONE" -- \
+  "sudo DISK=$(printf %q "$DISK") TMP_MNT=$(printf %q "$TMP_MNT") PY_CMD=$(printf %q "$PY_CMD") bash -xe $REMOTE_TMP; rc=\$?; rm -f $REMOTE_TMP; exit \$rc"
+
+echo "[local] remote script finished."
