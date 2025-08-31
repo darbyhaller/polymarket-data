@@ -34,15 +34,7 @@ Notes
 import argparse
 import gzip
 import heapq
-try:
-    import orjson as _json
-    _USING_ORJSON = True
-except Exception:
-    import json as _json
-    _USING_ORJSON = False
-
-# Use orjson if available, fallback to stdlib json
-json = _json
+import orjson as json
 import os
 import sys
 import glob
@@ -277,17 +269,13 @@ ChunkRecord = Tuple[str, int, str]  # (key, ts_ms, raw_json_line)
 
 
 def dumps_bytes(obj) -> bytes:
-    """Convert object to JSON bytes regardless of json library used."""
-    if _USING_ORJSON:
-        return _json.dumps(obj)                 # orjson returns bytes
-    return _json.dumps(obj).encode("utf-8")     # stdlib json returns str -> bytes
+    """Convert object to JSON bytes (orjson always returns bytes)."""
+    return json.dumps(obj)
 
 
 def dumps_text(obj) -> str:
-    """Convert object to JSON string regardless of json library used."""
-    if _USING_ORJSON:
-        return _json.dumps(obj).decode("utf-8")  # orjson bytes -> str
-    return _json.dumps(obj)                      # stdlib json returns str
+    """Convert object to JSON string (orjson bytes -> str)."""
+    return json.dumps(obj).decode("utf-8")
 
 
 def extract_key_ts(line: str, key_field: Optional[str]) -> Optional[Tuple[str, int]]:
