@@ -2,6 +2,11 @@
 
 ## 🔑 Quick Cheat Sheet (Most Used Commands)
 
+### SSH in
+```bash
+gcloud compute ssh polymarket-vm --zone=us-central1-a
+```
+
 ### One-time env vars (in any shell)
 ```bash
 PROJECT=$(gcloud config get-value project)
