@@ -336,7 +336,8 @@ def preprocess_l2_to_l1_batch(input_files: List[str], output_writer: Union[str, 
     files_processed = 0
     
     # Track timestamps and network outage state
-    last_event_timestamp = None
+    last_event_timestamp = None  # For non-book events only (legacy)
+    last_any_timestamp = None    # For all events including book
     in_network_outage = False
     NETWORK_TIMEOUT_MS = 1000  # 1 second in milliseconds
     
@@ -369,46 +370,58 @@ def preprocess_l2_to_l1_batch(input_files: List[str], output_writer: Union[str, 
                             event = json.loads(line)
                             events_processed += 1
                             
-                            current_timestamp = event.get("timestamp")
-                            current_timestamp = int(current_timestamp)
+                            # Extract event timestamp (NOT recv_ts_ms - that's when we received it, not when event occurred)
+                            current_timestamp = event.get("timestamp") or event.get("ts_ms")
+                            if current_timestamp is not None:
+                                current_timestamp = int(current_timestamp)
                             
                             event_type = event.get("event_type")
                             
-                            # Skip "book" events for outage detection timing
-                            if event_type != "book":
-                                # Check for network outage (gap > 1 second since last event)
-                                if (last_event_timestamp is not None and
-                                    current_timestamp is not None and
-                                    current_timestamp - last_event_timestamp > NETWORK_TIMEOUT_MS):
-                                    
-                                    gap_duration = current_timestamp - last_event_timestamp
-                                    
-                                    # Only write marker if we weren't already in an outage
-                                    if not in_network_outage:
-                                        # Write "no network event" marker
-                                        no_network_marker = {
-                                            "ts_ms": last_event_timestamp + NETWORK_TIMEOUT_MS,
-                                            "event_type": "no_network_event",
-                                            "gap_duration_ms": gap_duration,
-                                            "message": "Network outage detected - no events received"
-                                        }
-                                        
-                                        if writer:
-                                            writer.write(no_network_marker)
-                                        else:
-                                            outfile.write(json.dumps(no_network_marker) + '\n')
-                                        
-                                        no_network_events += 1
-                                    
-                                    # Stay in outage state until we see normal activity
-                                    in_network_outage = True
+                            # Handle timestamp ordering and gap detection for ALL events
+                            if current_timestamp is not None:
+                                # Check for timestamp going backwards (cross-file monotonicity issue)
+                                if (last_any_timestamp is not None and
+                                    current_timestamp < last_any_timestamp):
+                                    # Timestamp decreased - treat as new segment, reset gap detector
+                                    print(f"DEBUG: Timestamp decreased from {last_any_timestamp} to {current_timestamp} - resetting gap detector")
+                                    last_any_timestamp = current_timestamp
+                                    last_event_timestamp = current_timestamp if event_type != "book" else last_event_timestamp
+                                    in_network_outage = False  # Clear outage state on new segment
                                 else:
-                                    # Normal gap - we're out of outage state
-                                    in_network_outage = False
+                                    # Normal forward progression - check for gaps using ANY event type
+                                    if (last_any_timestamp is not None and
+                                        current_timestamp - last_any_timestamp > NETWORK_TIMEOUT_MS):
+                                        
+                                        gap_duration = current_timestamp - last_any_timestamp
+                                        
+                                        # Only write marker if we weren't already in an outage
+                                        if not in_network_outage:
+                                            print(f"DEBUG: Writing network outage marker for gap of {gap_duration}ms")
+                                            # Write "no network event" marker
+                                            no_network_marker = {
+                                                "ts_ms": last_any_timestamp + NETWORK_TIMEOUT_MS,
+                                                "event_type": "no_network_event",
+                                                "gap_duration_ms": gap_duration,
+                                                "message": "Network outage detected - no events received"
+                                            }
+                                            
+                                            if writer:
+                                                writer.write(no_network_marker)
+                                            else:
+                                                outfile.write(json.dumps(no_network_marker) + '\n')
+                                            
+                                            no_network_events += 1
+                                        
+                                        # Stay in outage state until we see normal activity
+                                        in_network_outage = True
+                                    else:
+                                        # Normal gap or first event - clear outage on ANY event arrival
+                                        in_network_outage = False
                                 
-                                # Update last event timestamp for next iteration (exclude book events)
-                                if current_timestamp is not None:
-                                    last_event_timestamp = current_timestamp
+                                # Update timestamps for next iteration
+                                last_any_timestamp = current_timestamp  # Track ALL events including book
+                                if event_type != "book":
+                                    last_event_timestamp = current_timestamp  # Track non-book events (legacy)
                             
                             # Process event and get L1 update if any
                             l1_quote = processor.process_event(event)
