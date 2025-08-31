@@ -34,7 +34,15 @@ Notes
 import argparse
 import gzip
 import heapq
-import orjson as json
+try:
+    import orjson as _json
+    _USING_ORJSON = True
+except Exception:
+    import json as _json
+    _USING_ORJSON = False
+
+# Use orjson if available, fallback to stdlib json
+json = _json
 import os
 import sys
 import glob
@@ -228,7 +236,8 @@ class L1Processor:
 # --------------------
 
 def open_file_smart(path: str):
-    return gzip.open(path, "rt", encoding="utf-8") if path.endswith(".gz") else open(path, "r", encoding="utf-8")
+    """Open file with appropriate decompression."""
+    return gzip.open(path, "rt", encoding="utf-8", newline="") if path.endswith(".gz") else open(path, "r", encoding="utf-8", newline="")
 
 
 def discover_input_files(input_path: str) -> List[str]:
@@ -267,6 +276,20 @@ def discover_input_files(input_path: str) -> List[str]:
 ChunkRecord = Tuple[str, int, str]  # (key, ts_ms, raw_json_line)
 
 
+def dumps_bytes(obj) -> bytes:
+    """Convert object to JSON bytes regardless of json library used."""
+    if _USING_ORJSON:
+        return _json.dumps(obj)                 # orjson returns bytes
+    return _json.dumps(obj).encode("utf-8")     # stdlib json returns str -> bytes
+
+
+def dumps_text(obj) -> str:
+    """Convert object to JSON string regardless of json library used."""
+    if _USING_ORJSON:
+        return _json.dumps(obj).decode("utf-8")  # orjson bytes -> str
+    return _json.dumps(obj)                      # stdlib json returns str
+
+
 def extract_key_ts(line: str, key_field: Optional[str]) -> Optional[Tuple[str, int]]:
     try:
         ev = json.loads(line)
@@ -286,10 +309,10 @@ def extract_key_ts(line: str, key_field: Optional[str]) -> Optional[Tuple[str, i
 def write_sorted_chunk(tmpdir: str, chunk: List[ChunkRecord], idx: int) -> str:
     chunk.sort(key=lambda r: (r[0], r[1]))
     path = os.path.join(tmpdir, f"chunk_{idx:05d}.jsonl")
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "wb") as f:  # Binary mode for orjson compatibility
         for k, ts, raw in chunk:
             # store envelope as JSON for safety
-            f.write(json.dumps({"k": k, "ts": ts, "raw": raw}) + "\n")
+            f.write(dumps_bytes({"k": k, "ts": ts, "raw": raw}) + b"\n")  # bytes newline
     return path
 
 
@@ -382,19 +405,19 @@ def merge_and_process(
         outages_out_file = open(writer_outages, "w", encoding="utf-8")
 
     def write_record(rec: Dict, is_outage: bool = False):
-        j = json.dumps(rec)
+        j = dumps_text(rec)  # Ensure we get string for text files
         if is_outage and writer_outages is not None and not interleave_outages:
             if isinstance(writer_outages, str):
                 assert outages_out_file is not None
                 outages_out_file.write(j + "\n")
             else:
-                writer_outages.write(rec)
+                writer_outages.write(rec)  # RotatingGzipWriter handles dict directly
         else:
             if isinstance(writer_main, str):
                 assert main_out_file is not None
                 main_out_file.write(j + "\n")
             else:
-                writer_main.write(rec)
+                writer_main.write(rec)  # RotatingGzipWriter handles dict directly
 
     # Open all chunk files
     files = [open(p, "r", encoding="utf-8") for p in chunk_paths]
