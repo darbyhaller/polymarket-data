@@ -275,11 +275,10 @@ def extract_key_ts(line: str, key_field: Optional[str]) -> Optional[Tuple[str, i
 
 def write_sorted_chunk(tmpdir: str, chunk: List[ChunkRecord], idx: int) -> str:
     chunk.sort(key=lambda r: (r[0], r[1]))
-    path = os.path.join(tmpdir, f"chunk_{idx:05d}.jsonl")
-    with open(path, "wb") as f:  # Binary mode for orjson compatibility
+    path = os.path.join(tmpdir, f"chunk_{idx:05d}.tsv")
+    with open(path, "wb") as f:
         for k, ts, raw in chunk:
-            # store envelope as JSON for safety
-            f.write(dumps_bytes({"k": k, "ts": ts, "raw": raw}) + b"\n")  # bytes newline
+            f.write(k.encode() + b"\t" + str(ts).encode() + b"\t" + raw.encode() + b"\n")
     return path
 
 
@@ -349,6 +348,14 @@ class HeapItem:
         return (self.k, self.ts) < (other.k, other.ts)
 
 
+def _readenv(fh):
+    """Read TSV envelope: no JSON parse for the envelope"""
+    line = fh.readline()
+    if not line:
+        return None
+    k, ts_s, raw = line.rstrip("\n").split("\t", 2)
+    return k, int(ts_s), raw
+
 def merge_and_process(
     chunk_paths: List[str],
     processor: L1Processor,
@@ -391,11 +398,9 @@ def merge_and_process(
 
     heap: List[HeapItem] = []
     for i, fh in enumerate(files):
-        line = fh.readline()
-        if not line:
-            continue
-        env = json.loads(line)
-        heapq.heappush(heap, HeapItem(env["k"], int(env["ts"]), env["raw"], i))
+        env = _readenv(fh)
+        if env:
+            heapq.heappush(heap, HeapItem(env[0], env[1], env[2], i))
 
     prev_ts_by_key: Dict[str, int] = {}
     events_read = 0
@@ -411,10 +416,9 @@ def merge_and_process(
             item = heapq.heappop(heap)
             k, ts, raw, idx = item.k, item.ts, item.raw, item.src_idx
             # refill from same file
-            nxt = files[idx].readline()
+            nxt = _readenv(files[idx])
             if nxt:
-                env = json.loads(nxt)
-                heapq.heappush(heap, HeapItem(env["k"], int(env["ts"]), env["raw"], idx))
+                heapq.heappush(heap, HeapItem(nxt[0], nxt[1], nxt[2], idx))
 
             # Outage detection (exact, per key)
             if k in prev_ts_by_key:
