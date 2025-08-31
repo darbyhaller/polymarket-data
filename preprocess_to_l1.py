@@ -39,6 +39,8 @@ import os
 import sys
 import glob
 import tempfile
+import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
@@ -293,13 +295,20 @@ def write_sorted_chunk(tmpdir: str, chunk: List[ChunkRecord], idx: int) -> str:
 
 def make_chunks(input_files: List[str], key_field: Optional[str], chunk_max_records: int, chunk_max_bytes: int) -> List[str]:
     tmpdir = tempfile.mkdtemp(prefix="l1sort_")
+    print(f"Created temp directory: {tmpdir}")
     chunk: List[ChunkRecord] = []
     chunks: List[str] = []
     recs = 0
     bytes_acc = 0
     chunk_idx = 0
+    total_records = 0
+    start_time = time.time()
 
-    for path in input_files:
+    for file_idx, path in enumerate(input_files):
+        print(f"Processing file {file_idx + 1}/{len(input_files)}: {path}")
+        file_start = time.time()
+        file_records = 0
+        
         with open_file_smart(path) as f:
             for line in f:
                 if not line or line == "\n":
@@ -311,14 +320,31 @@ def make_chunks(input_files: List[str], key_field: Optional[str], chunk_max_reco
                 chunk.append((k, ts, line.rstrip('\n')))
                 recs += 1
                 bytes_acc += len(line)
+                file_records += 1
+                total_records += 1
+                
+                # Progress update every 100K records
+                if total_records % 100000 == 0:
+                    elapsed = time.time() - start_time
+                    print(f"  Processed {total_records:,} records in {elapsed:.1f}s ({total_records/elapsed:.0f} rec/s)")
+                
                 if recs >= chunk_max_records or bytes_acc >= chunk_max_bytes:
+                    print(f"  Writing chunk {chunk_idx} ({recs:,} records, {bytes_acc/1024/1024:.1f} MB)")
                     chunks.append(write_sorted_chunk(tmpdir, chunk, chunk_idx))
                     chunk_idx += 1
                     chunk.clear()
                     recs = 0
                     bytes_acc = 0
+        
+        file_elapsed = time.time() - file_start
+        print(f"  Completed file in {file_elapsed:.1f}s ({file_records:,} records)")
+    
     if chunk:
+        print(f"Writing final chunk {chunk_idx} ({recs:,} records)")
         chunks.append(write_sorted_chunk(tmpdir, chunk, chunk_idx))
+    
+    total_elapsed = time.time() - start_time
+    print(f"Chunking complete: {total_records:,} total records in {total_elapsed:.1f}s ({total_records/total_elapsed:.0f} rec/s)")
     return chunks
 
 
@@ -345,6 +371,8 @@ def merge_and_process(
     """K-way merge the sorted chunks; emit L1 updates and outages in order.
     Returns: (events_read, l1_updates, outages)
     """
+    print(f"Starting merge and processing of {len(chunk_paths)} chunks...")
+    start_time = time.time()
     # Prepare output handles
     main_out_file = None
     outages_out_file = None
@@ -386,6 +414,9 @@ def merge_and_process(
     ms = 1000.0
 
     try:
+        progress_interval = 100000  # Report every 100k events
+        last_progress_time = start_time
+        
         while heap:
             item = heapq.heappop(heap)
             k, ts, raw, idx = item.k, item.ts, item.raw, item.src_idx
@@ -424,6 +455,20 @@ def merge_and_process(
             if l1:
                 write_record(l1.to_dict(), is_outage=False)
                 l1_updates += 1
+            
+            # Progress reporting
+            if events_read % progress_interval == 0:
+                current_time = time.time()
+                elapsed = current_time - start_time
+                interval_elapsed = current_time - last_progress_time
+                interval_rate = progress_interval / interval_elapsed if interval_elapsed > 0 else 0
+                overall_rate = events_read / elapsed if elapsed > 0 else 0
+                
+                event_time = datetime.fromtimestamp(ts/1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                print(f"  Processed {events_read:,} events ({l1_updates:,} L1 updates, {outages} outages) | "
+                      f"Rate: {interval_rate:.0f}/s (avg {overall_rate:.0f}/s) | "
+                      f"Event time: {event_time}")
+                last_progress_time = current_time
     finally:
         for fh in files:
             try:
@@ -435,7 +480,49 @@ def merge_and_process(
         if outages_out_file:
             outages_out_file.close()
 
+    total_elapsed = time.time() - start_time
+    overall_rate = events_read / total_elapsed if total_elapsed > 0 else 0
+    print(f"Merge and processing complete: {events_read:,} events in {total_elapsed:.1f}s ({overall_rate:.0f} rec/s)")
+    
+    # Clean up chunk files
+    print("Cleaning up temporary chunk files...")
+    cleanup_start = time.time()
+    for chunk_path in chunk_paths:
+        try:
+            chunk_dir = os.path.dirname(chunk_path)
+            if os.path.exists(chunk_dir) and chunk_dir.startswith('/tmp/l1sort_'):
+                import shutil
+                shutil.rmtree(chunk_dir)
+                print(f"  Removed temp directory: {chunk_dir}")
+                break  # All chunks are in the same temp dir
+        except Exception as e:
+            print(f"  Warning: Could not clean up {chunk_path}: {e}")
+    
+    cleanup_elapsed = time.time() - cleanup_start
+    print(f"Cleanup complete in {cleanup_elapsed:.1f}s")
+    
     return events_read, l1_updates, outages
+
+# --------------------
+# Disk usage utilities
+# --------------------
+
+def get_disk_usage_gb(path: str = None) -> Tuple[float, float, float]:
+    """Get disk usage in GB for the given path (or current directory if None).
+    Returns: (total_gb, used_gb, free_gb)
+    """
+    if path is None:
+        path = "."
+    try:
+        total, used, free = shutil.disk_usage(path)
+        return (total / (1024**3), used / (1024**3), free / (1024**3))
+    except Exception:
+        return (0.0, 0.0, 0.0)
+
+def print_disk_usage(label: str, path: str = None):
+    """Print disk usage information with a label."""
+    total_gb, used_gb, free_gb = get_disk_usage_gb(path)
+    print(f"{label}: {used_gb:.2f} GB used, {free_gb:.2f} GB free, {total_gb:.2f} GB total")
 
 # --------------------
 # Main
@@ -506,6 +593,10 @@ def main():
     print(f"Total events read: {events_read}")
     print(f"L1 updates written: {l1_updates}")
     print(f"Outage markers written: {outages} ({'interleaved' if interleave else 'separate file'})")
+    
+    # Show disk usage before cleanup
+    tmpdir = os.getenv("TMPDIR", "/tmp")
+    print_disk_usage("Final disk usage", tmpdir)
 
 
 if __name__ == "__main__":
