@@ -1,3 +1,4 @@
+echo "THIS IS DEPRECATED, RUNS SUPER SLOW. JUST RUN PREPROCESS LOCALLY"
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -171,3 +172,4 @@ gcloud compute ssh "$INST" --zone "$ZONE" -- \
   "sudo DISK=$(printf %q "$DISK") TMP_MNT=$(printf %q "$TMP_MNT") PY_CMD=$(printf %q "$PY_CMD") bash -xe $REMOTE_TMP; rc=\$?; rm -f $REMOTE_TMP; exit \$rc"
 
 echo "[local] remote script finished."
+echo "THIS IS DEPRECATED, RUNS SUPER SLOW. JUST RUN PREPROCESS LOCALLY"
