@@ -38,7 +38,7 @@ REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-requirements.txt}"        # optional; sc
 SA_NAME="${SA_NAME:-vm-polymarket}"
 SA_EMAIL="$SA_NAME@$PROJECT.iam.gserviceaccount.com"
 
-# Local retention (days) before deleting local gz files
+# Local retention (days) before deleting local parquet files
 LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-3}"
 
 #############################################
@@ -223,10 +223,22 @@ pip install --upgrade pip
 if [ -f "$REQUIREMENTS_FILE" ]; then
   pip install -r "$REQUIREMENTS_FILE" || true
 fi
-# Ensure minimal deps always installed
-pip install -q requests websocket-client
 
 log "Install systemd units"
+
+# Stop existing services if they're running (for updates)
+if systemctl is-active --quiet polymarket; then
+  log "Stopping existing polymarket service for update"
+  systemctl stop polymarket
+fi
+if systemctl is-active --quiet polymarket-sync.timer; then
+  log "Stopping existing sync timer for update"
+  systemctl stop polymarket-sync.timer
+fi
+if systemctl is-active --quiet polymarket-clean.timer; then
+  log "Stopping existing clean timer for update"
+  systemctl stop polymarket-clean.timer
+fi
 
 cat >/etc/systemd/system/polymarket.service <<UNIT
 [Unit]
@@ -238,6 +250,7 @@ Wants=network-online.target
 User=root
 WorkingDirectory=$APP_DIR
 Environment=DATA_ROOT=$MOUNT_POINT
+Environment=PARQUET_ROOT=$MOUNT_POINT
 Environment=PYTHONUNBUFFERED=1
 Environment=ROTATE_MB=512
 ExecStart=$APP_DIR/.venv/bin/python $APP_DIR/$ENTRYPOINT
@@ -255,7 +268,8 @@ set -euo pipefail
 SRC="$MOUNT_POINT"
 DST="gs://$BUCKET/raw"
 CURHOUR=\$(date -u +%H)
-# Exclude current UTC hour to avoid uploading in-progress files
+# Exclude current UTC hour to avoid uploading in-progress parquet files
+# New structure: event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet
 gcloud storage rsync -r -x "hour=\${CURHOUR}(/|$)" "\$SRC" "\$DST"
 SYNC
 chmod +x /usr/local/bin/sync_to_gcs.sh
@@ -283,8 +297,9 @@ cat >/usr/local/bin/clean_old_local.sh <<CLEAN
 set -euo pipefail
 ROOT="$MOUNT_POINT"
 CURHOUR=\$(date -u +%H)
-# Delete gz files older than \$LOCAL_RETENTION_DAYS days, excluding current hour
-find "\$ROOT" -type f -name '*.jsonl.gz' -mmin +\$((\$LOCAL_RETENTION_DAYS*24*60)) \
+# Delete parquet files older than \$LOCAL_RETENTION_DAYS days, excluding current hour
+# New structure: event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet
+find "\$ROOT" -type f -name '*.parquet' -mmin +\$((\$LOCAL_RETENTION_DAYS*24*60)) \
   -not -path "*/hour=\${CURHOUR}/*" -print -delete
 CLEAN
 chmod +x /usr/local/bin/clean_old_local.sh
@@ -375,4 +390,4 @@ say "Done!"
 echo "Useful next steps:"
 echo "  • Tail ingest logs:  gcloud compute ssh $VM_NAME --zone=$ZONE -- 'journalctl -u polymarket -f'"
 echo "  • Check timers:      gcloud compute ssh $VM_NAME --zone=$ZONE -- 'systemctl list-timers | grep polymarket'"
-echo "  • Latest in GCS:     gcloud storage ls -r gs://$BUCKET/raw/year=*/month=*/day=*/hour=*/events-*.jsonl.gz | tail -n1"
+echo "  • Latest in GCS:     gcloud storage ls -r gs://$BUCKET/raw/event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet | tail -n1"
