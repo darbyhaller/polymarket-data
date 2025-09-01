@@ -250,6 +250,8 @@ def duckdb_sorted_row_iter(input_files: List[str], key_field: Optional[str], thr
     con = duckdb.connect()
     if threads > 0:
         con.execute(f"PRAGMA threads = {threads}")
+    print(f"THREADS: {threads}")
+    con.execute("PRAGMA memory_limit='36GB'")
 
     # columns we care about (explicit schema avoids inference churn)
     COLUMNS_SPEC = """{
@@ -307,29 +309,35 @@ def duckdb_sorted_row_iter(input_files: List[str], key_field: Optional[str], thr
         ORDER BY k, ts_ms
     """
 
-    # 5) Stream Arrow batches with a tqdm bar
+    # Count total rows for progress bar
+    total_rows = con.execute(
+        "SELECT COUNT(*) FROM ev WHERE COALESCE(timestamp, ts_ms) IS NOT NULL"
+    ).fetchone()[0]
+
+    # Execute and stream with progress bar
     con.execute(query)
-    with tqdm(total=total_rows, desc="Sorting & emitting", unit="events") as pbare:
-        while True:
-            batch = con.fetch_record_batch()  # requires: pip install pyarrow
-            if batch is None or batch.num_rows == 0:
-                break
-            arrays = [batch.column(i) for i in range(len(batch.schema.names))]
+
+    # DuckDB returns a pyarrow.RecordBatchReader here
+    reader = con.fetch_record_batch()
+
+    with tqdm(total=total_rows, unit="events", desc="Sorting & processing") as pbar:
+        for batch in reader:  # iterate RecordBatchReader -> yields pyarrow.RecordBatch
             n = batch.num_rows
+            arrays = [batch.column(i) for i in range(len(batch.schema.names))]
             for i in range(n):
                 yield {
                     "k": arrays[0][i].as_py(),
                     "ts_ms": arrays[1][i].as_py(),
                     "event_type": arrays[2][i].as_py(),
                     "asset_id": arrays[3][i].as_py(),
-                    "bids": arrays[4][i].as_py() or [],
-                    "asks": arrays[5][i].as_py() or [],
-                    "changes": arrays[6][i].as_py() or [],
+                    "bids": json.loads(arrays[4][i].as_py()) if arrays[4][i].as_py() else [],
+                    "asks": json.loads(arrays[5][i].as_py()) if arrays[5][i].as_py() else [],
+                    "changes": json.loads(arrays[6][i].as_py()) if arrays[6][i].as_py() else [],
                     "market": arrays[7][i].as_py() or "",
                     "market_title": arrays[8][i].as_py() or "",
                     "outcome": arrays[9][i].as_py() or "",
                 }
-            pbare.update(n)
+            pbar.update(n)
 
 def process_sorted_stream(sorted_iter, processor: L1Processor,
                           gap_threshold_s: float,
@@ -392,10 +400,6 @@ def process_sorted_stream(sorted_iter, processor: L1Processor,
         if l1:
             write_record(l1.to_dict())
             l1_updates += 1
-
-        if events_read % 100000 == 0:
-            elapsed = time.time() - start_time
-            print(f"Processed {events_read:,} events ({l1_updates:,} L1 updates, {outages} outages) | avg {events_read/elapsed:.0f}/s")
 
     if main_out_file: main_out_file.close()
     if outages_out_file: outages_out_file.close()
