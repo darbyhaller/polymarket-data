@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import DefaultDict, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+import igzip
 
 # Import your existing writer utility (unchanged)
 from writer import RotatingGzipWriter
@@ -207,8 +208,9 @@ class L1Processor:
 # --------------------
 
 def open_file_smart(path: str):
-    """Open file with appropriate decompression."""
-    return gzip.open(path, "rt", encoding="utf-8", newline="") if path.endswith(".gz") else open(path, "r", encoding="utf-8", newline="")
+    if path.endswith(".gz"):
+        return igzip.open(path, "rt", encoding="utf-8", newline="")
+    return open(path, "r", encoding="utf-8", newline="")
 
 
 def discover_input_files(input_path: str) -> List[str]:
