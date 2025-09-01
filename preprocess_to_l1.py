@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import DefaultDict, Dict, Iterable, Iterator, List, Optional, Tuple, Union
-import igzip
+from isal import igzip
 
 # Import your existing writer utility (unchanged)
 from writer import RotatingGzipWriter
