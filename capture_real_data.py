@@ -6,11 +6,11 @@ from threading import Lock, Event
 from datetime import datetime
 from collections import deque
 from fetch_markets import get_tradeable_asset_mappings
-from writer import write_event
+from parquet_writer import write_event, init_writer, close_writer
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
-OUTFILE = "./orderbook_clip.jsonl"
+OUTDIR = "./orderbook_parquet"
 MARKETS_UPDATE_INTERVAL = 10
 PING_INTERVAL = 30
 PING_TIMEOUT = 10
@@ -77,44 +77,20 @@ last_message_time = 0.0
 is_first_subscription = True
 backoff = BACKOFF_MIN  # Global backoff state
 
-outfile_handle = None
-_last_fsync = 0.0
-
+# File handling now managed by parquet writer
 def fs_open():
-    global outfile_handle, _last_fsync
-    os.makedirs(os.path.dirname(OUTFILE) or ".", exist_ok=True)
-    outfile_handle = open(OUTFILE, "a", encoding="utf-8", buffering=1)
-    _last_fsync = time.time()
-    print(f"Opened {OUTFILE} (append)")
+    """Initialize parquet writer."""
+    init_writer(root=OUTDIR, batch_size=1000, max_buffer_mb=64, compression="snappy")
+    print(f"Initialized parquet writer at {OUTDIR}")
 
 def fs_health_check():
-    """Check if file handle is still valid and working."""
-    global outfile_handle
-    if outfile_handle is None:
-        return False
-    try:
-        # Test if we can get the file descriptor
-        outfile_handle.fileno()
-        # Test if we can flush (this will fail if handle is corrupted)
-        outfile_handle.flush()
-        return True
-    except Exception:
-        return False
+    """Parquet writer handles its own health checks."""
+    return True
 
 def fs_close():
-    global outfile_handle
-    with file_lock:
-        if outfile_handle:
-            try:
-                outfile_handle.flush()
-                os.fsync(outfile_handle.fileno())
-            except Exception:
-                pass
-            try:
-                outfile_handle.close()
-            except Exception:
-                pass
-            outfile_handle = None
+    """Close parquet writer and flush all buffers."""
+    close_writer()
+    print("Closed parquet writer")
 
 def update_asset_mappings_from_api(force_update=False):
     global subs_version, previous_allowed_asset_ids
@@ -188,19 +164,18 @@ def markets_poll_loop():
         fetch_markets_and_populate_data(initial=False)
 
 def file_health_monitor():
-    """Monitor file handle health and recover if needed."""
+    """Monitor parquet writer health."""
     while not should_stop.is_set():
         if should_stop.wait(30):  # Check every 30 seconds
             break
         
-        if not fs_health_check():
-            print("File handle health check failed - attempting recovery")
-            try:
-                fs_close()
-                fs_open()
-                print("File handle recovered successfully")
-            except Exception as e:
-                print(f"File handle recovery failed: {e}")
+        # Parquet writer is more robust, but we can still do periodic flushes
+        try:
+            from parquet_writer import writer
+            if writer:
+                writer.flush()
+        except Exception as e:
+            print(f"Parquet writer flush failed: {e}")
 
 def send_subscription(ws):
     global subscribed_asset_ids, is_first_subscription
@@ -234,14 +209,8 @@ def on_open(ws):
     backoff = BACKOFF_MIN  # Reset backoff on successful connection
     print("WebSocket connected - reset backoff to minimum")
     
-    # Proactively check and refresh file handle on reconnection
-    if not fs_health_check():
-        print("File handle unhealthy on reconnect - refreshing")
-        try:
-            fs_close()
-            fs_open()
-        except Exception as e:
-            print(f"Failed to refresh file handle on reconnect: {e}")
+    # Parquet writer handles its own state management
+    print("WebSocket reconnected - parquet writer continues seamlessly")
     
     if not allowed_asset_ids:
         print("No allowed asset IDs; closing")
