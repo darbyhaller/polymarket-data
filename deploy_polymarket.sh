@@ -139,6 +139,11 @@ ensure_vm() {
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Set required environment variables for startup context
+export HOME=/root
+export USER=root
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 APP_DIR="$APP_DIR"
 MOUNT_POINT="/var/data/polymarket"
 REPO_URL="$REPO_URL"
@@ -149,6 +154,11 @@ BUCKET="$BUCKET"
 LOCAL_RETENTION_DAYS="$LOCAL_RETENTION_DAYS"
 
 log() { echo "[startup] \$*"; }
+
+log "Fix any broken dpkg state first"
+dpkg --configure -a || true
+apt-get update --fix-missing -y || true
+apt-get install -f -y || true
 
 log "Update & install base packages"
 apt-get update -y
@@ -204,18 +214,22 @@ log "Prepare app dir & venv"
 mkdir -p "\$APP_DIR"
 cd "\$APP_DIR"
 
+# Configure git first
+git config --global user.name "VM User"
+git config --global user.email "vm@polymarket.com"
+git config --global --add safe.directory "\$APP_DIR"
+
 if [ ! -d .git ]; then
   log "Cloning \$REPO_URL (\$REPO_BRANCH)"
-  git clone --branch "\$REPO_BRANCH" "\$REPO_URL" "\$APP_DIR"
+  git clone --branch "\$REPO_BRANCH" "\$REPO_URL" .
 else
   log "Repo exists; updating"
+  git remote set-url origin "\$REPO_URL" || true
   git fetch origin "\$REPO_BRANCH" || true
-  git checkout "\$REPO_BRANCH" || true
-  git pull --ff-only || true
+  git reset --hard "origin/\$REPO_BRANCH" || true
 fi
 
-chown -R \${SUDO_USER:-\$USER}:\${SUDO_USER:-\$USER} "\$APP_DIR"
-git config --global --add safe.directory /opt/polymarket
+chown -R dhaller:dhaller "\$APP_DIR"
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -371,10 +385,10 @@ EOS
 # MAIN
 #############################################
 need gcloud
-# ensure_project
-# ensure_bucket
-# ensure_sa_and_iam
-# ensure_disk
+ensure_project
+ensure_bucket
+ensure_sa_and_iam
+ensure_disk
 ensure_vm
 
 say "Done!"
