@@ -10,7 +10,7 @@ from parquet_writer import write_event, init_writer, close_writer
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
-OUTDIR = "./orderbook_parquet"
+OUTDIR = os.getenv('PARQUET_ROOT', '/var/data/polymarket')
 MARKETS_UPDATE_INTERVAL = 10
 PING_INTERVAL = 30
 PING_TIMEOUT = 10
