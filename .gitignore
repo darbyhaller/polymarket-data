@@ -1,6 +1,7 @@
 temp
 *.jsonl
 *.json
+raw
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
