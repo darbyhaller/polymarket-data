@@ -264,6 +264,7 @@ def on_message(ws, msg):
 
         events = payload if isinstance(payload, list) else [payload]
         for d in events:
+            metrics['recv'] += 1
             et = d.get("event_type", "unknown")
             aid = d.get("asset_id")
             with data_lock:
@@ -314,6 +315,7 @@ def on_message(ws, msg):
             for k, v in d.items():
                 if k not in base:
                     base[k] = v
+            metrics['kept'] += 1
             write_event(base)
         log_metrics()
     except Exception as e:
