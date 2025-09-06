@@ -279,7 +279,7 @@ UNIT
 cat >/usr/local/bin/sync_to_gcs.sh <<SYNC
 #!/usr/bin/env bash
 set -euo pipefail
-SRC="\$MOUNT_POINT"
+SRC="\$MOUNT_POINT/parquets"
 DST="gs://\$BUCKET/raw"
 CURHOUR=\\\$(date -u +%H)
 # Exclude current UTC hour to avoid uploading in-progress parquet files
@@ -309,7 +309,7 @@ SYNCTIMER
 cat >/usr/local/bin/clean_old_local.sh <<CLEAN
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="\$MOUNT_POINT"
+ROOT="\$MOUNT_POINT/parquets"
 CURHOUR=\\\$(date -u +%H)
 # Delete parquet files older than \\\$LOCAL_RETENTION_DAYS days, excluding current hour
 # New structure: event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet
