@@ -64,8 +64,8 @@ class EventTypeParquetWriter:
     def __init__(
         self,
         root: str,
-        batch_size: int = 1000,
-        max_buffer_mb: int = 64,
+        batch_size: int = 5000,
+        max_buffer_mb: int = 128,
         rotate_mb: int = 256,
         compression: str = "zstd"
     ):
@@ -87,7 +87,7 @@ class EventTypeParquetWriter:
         self.file_sequences: Dict[str, int] = defaultdict(int)
         self.writers: Dict[str, pq.ParquetWriter] = {}
         self.rows_written: Dict[str, int] = defaultdict(int)
-        self.rows_per_file: int = 250_000  # rotate by rows (tune as desired)
+        self.rows_per_file: int = 1_000_000  # rotate by rows (4x larger for ~100-300MB files)
         
         os.makedirs(root, exist_ok=True)
         
@@ -358,9 +358,9 @@ class EventTypeParquetWriter:
                 self.current_hour[file_key] = hour_dt
                 self._open_writer(file_key, schema, path)
 
-            # Write this batch as a new row group
+            # Write this batch as a new row group with optimal row group size
             table = pa.Table.from_pylist(events, schema=schema)
-            self.writers[file_key].write_table(table)
+            self.writers[file_key].write_table(table, row_group_size=200_000)
             self.rows_written[file_key] += table.num_rows
             
         except Exception as e:
@@ -398,10 +398,17 @@ def write_event(event: Dict[str, Any]):
         writer.write(event)
 
 
-def init_writer(root: str = "./orderbook_parquet", **kwargs):
-    """Initialize the global parquet writer."""
+def init_writer(root: str = "./orderbook_parquet", batch_size: int = 5000,
+                max_buffer_mb: int = 128, compression: str = "zstd", **kwargs):
+    """Initialize the global parquet writer with optimized defaults for larger files."""
     global writer
-    writer = EventTypeParquetWriter(root=root, **kwargs)
+    writer = EventTypeParquetWriter(
+        root=root,
+        batch_size=batch_size,
+        max_buffer_mb=max_buffer_mb,
+        compression=compression,
+        **kwargs
+    )
     return writer
 
 
