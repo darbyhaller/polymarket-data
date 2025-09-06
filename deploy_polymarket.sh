@@ -306,15 +306,22 @@ Persistent=true
 WantedBy=timers.target
 SYNCTIMER
 
-cat >/usr/local/bin/clean_old_local.sh <<CLEAN
+cat >/usr/local/bin/clean_old_local.sh <<'CLEAN'
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="\$MOUNT_POINT/parquets"
-CURHOUR=\\\$(date -u +%H)
-# Delete parquet files older than \\\$LOCAL_RETENTION_DAYS days, excluding current hour
-# New structure: event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet
-find "\\\$ROOT" -type f -name '*.parquet' -mmin +\\\$((\\\$LOCAL_RETENTION_DAYS*24*60)) \\
-  -not -path "*/hour=\\\${CURHOUR}/*" -print -delete
+# Defaults if not passed via Environment/EnvironmentFile
+PARQUET_ROOT="${PARQUET_ROOT:-/var/data/polymarket}"
+LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-3}"
+ROOT="$PARQUET_ROOT/parquets"
+[ -d "$ROOT" ] || exit 0
+CURHOUR="$(date -u +%H)"
+RETENTION_MINUTES=$(( LOCAL_RETENTION_DAYS * 24 * 60 ))
+# Delete parquet files older than retention, excluding the current UTC hour dir
+find "$ROOT" -type f -name '*.parquet' \
+  ! -path "*/hour=${CURHOUR}/*" \
+  -mmin +$RETENTION_MINUTES -print -delete
+# Optional: prune empty directories left behind (best-effort)
+find "$ROOT" -type d -empty -prune -exec rmdir -p -- {} + 2>/dev/null || true
 CLEAN
 chmod +x /usr/local/bin/clean_old_local.sh
 
