@@ -23,7 +23,7 @@ journalctl -u polymarket -f
 ### Peek latest 5 events in GCS (zsh-safe, newest lines)
 ```zsh
 setopt noglob
-LATEST=$(gcloud storage ls -r gs://$BUCKET/raw/year=*/month=*/day=*/hour=*/events-*.jsonl.gz | tail -n1)
+LATEST=$(gcloud storage ls -r gs://$BUCKET/parquets/year=*/month=*/day=*/hour=*/events-*.jsonl.gz | tail -n1)
 unsetopt noglob
 gcloud storage cat "$LATEST" | gunzip -c | \
 python3 - <<'PYCODE'
@@ -45,7 +45,7 @@ PYCODE
 Y=$(date -u -d "yesterday" +%Y)
 M=$(date -u -d "yesterday" +%m)
 D=$(date -u -d "yesterday" +%d)
-gcloud storage cp -r gs://$BUCKET/raw/year=$Y/month=$M/day=$D ./data/
+gcloud storage cp -r gs://$BUCKET/parquets/year=$Y/month=$M/day=$D ./data/
 ```
 
 ### Check sync timer
@@ -108,7 +108,7 @@ journalctl -u polymarket -f
 ```
 
 ### Sync (`polymarket-sync.timer`)
-Runs hourly → syncs `/var/data/polymarket` → `gs://polymarket-raw-<PROJECT>/raw`.
+Runs hourly → syncs `/var/data/polymarket` → `gs://polymarket-raw-<PROJECT>/parquets`.
 
 ```bash
 systemctl list-timers | grep polymarket-sync
@@ -138,7 +138,7 @@ gcloud storage buckets describe gs://polymarket-raw-$PROJECT --format=json | jq 
 
 ### Find latest file
 ```bash
-LATEST=$(gcloud storage ls -r gs://$BUCKET/raw/year=*/month=*/day=*/hour=*/events-*.jsonl.gz | tail -n1)
+LATEST=$(gcloud storage ls -r gs://$BUCKET/parquets/year=*/month=*/day=*/hour=*/events-*.jsonl.gz | tail -n1)
 ```
 
 ### Preview events (safe pretty-print per line)
@@ -162,12 +162,12 @@ gcloud storage cat "$LATEST" | gunzip -c | wc -l
 Y=$(date -u -d "yesterday" +%Y)
 M=$(date -u -d "yesterday" +%m)
 D=$(date -u -d "yesterday" +%d)
-gcloud storage cp -r gs://$BUCKET/raw/year=$Y/month=$M/day=$D ./data/
+gcloud storage cp -r gs://$BUCKET/parquets/year=$Y/month=$M/day=$D ./data/
 ```
 
 ### Specific hours
 ```bash
-gcloud storage cp -r gs://$BUCKET/raw/year=2025/month=08/day=30/hour=1[2-5]/ ./data/
+gcloud storage cp -r gs://$BUCKET/parquets/year=2025/month=08/day=30/hour=1[2-5]/ ./data/
 ```
 
 ## 7. gcloud Configs

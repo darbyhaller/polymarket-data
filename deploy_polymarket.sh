@@ -280,7 +280,7 @@ cat >/usr/local/bin/sync_to_gcs.sh <<SYNC
 #!/usr/bin/env bash
 set -euo pipefail
 SRC="\$MOUNT_POINT/parquets"
-DST="gs://\$BUCKET/raw"
+DST="gs://\$BUCKET/parquets"
 CURHOUR=\\\$(date -u +%H)
 # Exclude current UTC hour to avoid uploading in-progress parquet files
 # New structure: event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet
@@ -395,4 +395,4 @@ say "Done!"
 echo "Useful next steps:"
 echo "  • Tail ingest logs:  gcloud compute ssh $VM_NAME --zone=$ZONE -- 'journalctl -u polymarket -f'"
 echo "  • Check timers:      gcloud compute ssh $VM_NAME --zone=$ZONE -- 'systemctl list-timers | grep polymarket'"
-echo "  • Latest in GCS:     gcloud storage ls -r gs://$BUCKET/raw/event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet | tail -n1"
+echo "  • Latest in GCS:     gcloud storage ls -r gs://$BUCKET/parquets/event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet | tail -n1"
