@@ -23,6 +23,20 @@ STALL_TIMEOUT = 90
 BACKOFF_MIN = 1.0
 BACKOFF_MAX = 20.0
 
+from collections import Counter
+metrics = Counter()
+_last_metrics_log = 0.0
+
+def log_metrics(every=30):
+    global _last_metrics_log
+    now = time.time()
+    if now - _last_metrics_log >= every:
+        _last_metrics_log = now
+        print("[metrics]",
+              dict(sorted(metrics.items())),
+              "allowed_asset_ids:", len(allowed_asset_ids),
+              "seen_hashes:", seen_hashes.size())
+
 class BoundedHashCache:
     """LRU cache for hash deduplication with bounded memory usage."""
     
@@ -301,6 +315,7 @@ def on_message(ws, msg):
                 if k not in base:
                     base[k] = v
             write_event(base)
+        log_metrics()
     except Exception as e:
         print(f"on_message error: {e}")
 
