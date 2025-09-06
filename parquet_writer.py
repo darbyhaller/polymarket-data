@@ -64,7 +64,7 @@ class EventTypeParquetWriter:
     def __init__(
         self,
         root: str,
-        batch_size: int = 5000,
+        batch_size: int = 200_000,
         max_buffer_mb: int = 128,
         rotate_mb: int = 256,
         compression: str = "zstd"
@@ -360,7 +360,7 @@ class EventTypeParquetWriter:
 
             # Write this batch as a new row group with optimal row group size
             table = pa.Table.from_pylist(events, schema=schema)
-            self.writers[file_key].write_table(table, row_group_size=200_000)
+            self.writers[file_key].write_table(table)
             self.rows_written[file_key] += table.num_rows
             
         except Exception as e:
