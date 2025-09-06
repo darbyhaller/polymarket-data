@@ -10,13 +10,16 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from collections import defaultdict, deque
 import time
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-try:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-except ImportError:
-    raise ImportError("pyarrow is required: pip install pyarrow")
-
+DEFAULTS = {
+    "compression": os.getenv("PM_COMPRESSION", "zstd"),
+    "batch_size": int(os.getenv("PM_BATCH_SIZE", "200000")),     # events buffered per type before flush
+    "row_group_size": int(os.getenv("PM_ROW_GROUP_SIZE", "200000")),  # rows per row-group
+    "max_buffer_mb": int(os.getenv("PM_MAX_BUFFER_MB", "256")),  # memory guard across buffers
+    "rows_per_file": int(os.getenv("PM_ROWS_PER_FILE", "1000000")) # rotate file around this many rows
+}
 
 def price_to_int(price_str: str) -> int:
     """Convert price string to uint32 integer (multiply by 10000)."""
@@ -64,16 +67,20 @@ class EventTypeParquetWriter:
     def __init__(
         self,
         root: str,
-        batch_size: int = 200_000,
-        max_buffer_mb: int = 128,
+        batch_size: int = DEFAULTS["batch_size"],
+        max_buffer_mb: int = DEFAULTS["max_buffer_mb"],
         rotate_mb: int = 256,
-        compression: str = "zstd"
+        compression: str = DEFAULTS["compression"],
+        row_group_size: int = DEFAULTS["row_group_size"],
+        rows_per_file: int = DEFAULTS["rows_per_file"],
     ):
         self.root = root
         self.batch_size = batch_size
         self.max_buffer_bytes = max_buffer_mb * 1024 * 1024
         self.rotate_bytes = rotate_mb * 1024 * 1024
         self.compression = compression
+        self.row_group_size = row_group_size
+        self.rows_per_file = rows_per_file
         
         self.lock = threading.Lock()
         
@@ -399,17 +406,16 @@ def write_event(event: Dict[str, Any]):
         writer.write(event)
 
 
-def init_writer(root: str = "./orderbook_parquet", batch_size: int = 5000,
-                max_buffer_mb: int = 128, compression: str = "zstd", **kwargs):
-    """Initialize the global parquet writer with optimized defaults for larger files."""
+def init_writer(**overrides):
+    """Initialize the global parquet writer with sane unified defaults."""
     global writer
-    writer = EventTypeParquetWriter(
-        root=root,
-        batch_size=batch_size,
-        max_buffer_mb=max_buffer_mb,
-        compression=compression,
-        **kwargs
-    )
+    params = {**DEFAULTS, **overrides}  # merge overrides into defaults
+    writer = EventTypeParquetWriter(**params)
+
+    # Guardrail check (only once)
+    if writer.batch_size < writer.row_group_size // 20:
+        print(f"[parquet-writer WARNING] batch_size={writer.batch_size} is very small "
+              f"vs row_group_size={writer.row_group_size}. Expect many tiny row groups.")
     return writer
 
 
@@ -420,63 +426,4 @@ def close_writer():
         writer.close()
         writer = None
 
-
-if __name__ == "__main__":
-    # Test the writer with optimized numeric encoding
-    import json
-    
-    # Test data samples based on the provided schemas
-    test_events = [
-        {
-            "recv_ts_ms": int(time.time() * 1000),
-            "event_type": "book",
-            "asset_id": "65818619657568813474341868652308942079804919287380422192892211131408793125422",
-            "market": "0xbd31dc8a20211944f6b70f31557f1001557b59905b7738480ca09bd4532f84af",
-            "market_title": "Test Market",
-            "outcome": "Yes",
-            "timestamp": "123456789000",
-            "hash": "0x123...",
-            "bids": [
-                {"price": "0.48", "size": "30.1234"},
-                {"price": "0.49", "size": "20.5678"}
-            ],
-            "asks": [
-                {"price": "0.52", "size": "25.9876"},
-                {"price": "0.53", "size": "60.1111"}
-            ]
-        },
-        {
-            "recv_ts_ms": int(time.time() * 1000),
-            "event_type": "price_change",
-            "asset_id": "71321045679252212594626385532706912750332728571942532289631379312455583992563",
-            "market": "0x5f65177b394277fd294cd75650044e32ba009a95022d88a0c1d565897d72f8f1",
-            "market_title": "Test Market 2",
-            "outcome": "No",
-            "timestamp": "1729084877448",
-            "hash": "3cd4d61e042c81560c9037ece0c61f3b1a8fbbdd",
-            "changes": [
-                {"price": "0.4", "side": "SELL", "size": "3300.2345"},
-                {"price": "0.5", "side": "SELL", "size": "3400.6789"}
-            ]
-        }
-    ]
-    
-    # Test the writer
-    print("Testing optimized parquet writer...")
-    with EventTypeParquetWriter("./test_parquet") as writer:
-        for event in test_events:
-            writer.write(event)
-    
-    print("Test completed successfully!")
-    
-    # Read back and verify the numeric encoding
-    try:
-        import pandas as pd
-        book_file = 'test_parquet/event_type=book/year=2025/month=09/day=01/hour=21/events-000.parquet'
-        df = pd.read_parquet(book_file)
-        print(f"\nBook data verification:")
-        print(f"Price data type: {df.iloc[0]['bids'][0]['price']} (type: {type(df.iloc[0]['bids'][0]['price'])})")
-        print(f"Size data type: {df.iloc[0]['bids'][0]['size']} (type: {type(df.iloc[0]['bids'][0]['size'])})")
-        print(f"Original price 0.48 -> stored as {df.iloc[0]['bids'][0]['price']} -> converts back to {df.iloc[0]['bids'][0]['price']/10000}")
-    except Exception as e:
         print(f"Verification error: {e}")
