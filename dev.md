@@ -138,7 +138,7 @@ gcloud storage buckets describe gs://polymarket-raw-$PROJECT --format=json | jq 
 
 ### Find latest file
 ```bash
-LATEST=$(gcloud storage ls -r gs://$BUCKET/parquets/year=*/month=*/day=*/hour=*/events-*.jsonl.gz | tail -n1)
+LATEST=$(gcloud storage ls -r gs://$BUCKET/parquets/*/year=*/month=*/day=*/hour=*/events-* | tail -n1)
 ```
 
 ### Preview events (safe pretty-print per line)
