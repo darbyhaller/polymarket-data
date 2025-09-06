@@ -34,12 +34,18 @@ def size_to_int(size_str: str) -> int:
         return 0
 
 
-def timestamp_to_int(ts_str: str) -> int:
-    """Convert timestamp string to int64."""
+def timestamp_to_int(ts) -> int:
+    """Convert timestamp to int64 milliseconds, handling seconds vs milliseconds."""
     try:
-        return int(ts_str)
+        x = int(ts)
     except (ValueError, TypeError):
         return 0
+    # Heuristic: seconds vs milliseconds
+    if x < 10**12:   # looks like seconds
+        return x * 1000
+    if x < 10**14:   # looks like milliseconds
+        return x
+    return x // 1000  # probably microseconds
 
 
 class EventTypeParquetWriter:
@@ -61,7 +67,7 @@ class EventTypeParquetWriter:
         batch_size: int = 1000,
         max_buffer_mb: int = 64,
         rotate_mb: int = 256,
-        compression: str = "snappy"
+        compression: str = "zstd"
     ):
         self.root = root
         self.batch_size = batch_size
@@ -75,11 +81,13 @@ class EventTypeParquetWriter:
         self.buffers: Dict[str, deque] = defaultdict(deque)
         self.buffer_sizes: Dict[str, int] = defaultdict(int)
         
-        # Track current files and sizes for rotation
+        # Track current files and open writers
         self.current_files: Dict[str, str] = {}
-        self.file_sizes: Dict[str, int] = defaultdict(int)
-        self.file_sequences: Dict[str, int] = defaultdict(int)
         self.current_hour: Dict[str, datetime] = {}
+        self.file_sequences: Dict[str, int] = defaultdict(int)
+        self.writers: Dict[str, pq.ParquetWriter] = {}
+        self.rows_written: Dict[str, int] = defaultdict(int)
+        self.rows_per_file: int = 250_000  # rotate by rows (tune as desired)
         
         os.makedirs(root, exist_ok=True)
         
@@ -143,6 +151,28 @@ class EventTypeParquetWriter:
                 pa.field("fee_rate_bps", pa.uint32())  # stored as bps * 100 (0.01 bps resolution)
             ])
         }
+    
+    def _open_writer(self, file_key: str, schema: pa.Schema, path: str):
+        """Open a new ParquetWriter for the given file key."""
+        self._close_writer(file_key)  # just in case
+        self.writers[file_key] = pq.ParquetWriter(
+            path,
+            schema=schema,
+            compression=self.compression,
+            use_dictionary=True,
+            write_statistics=True,
+            version="2.6",
+        )
+        self.rows_written[file_key] = 0
+
+    def _close_writer(self, file_key: str):
+        """Close the ParquetWriter for the given file key."""
+        w = self.writers.pop(file_key, None)
+        if w is not None:
+            try:
+                w.close()
+            except Exception:
+                pass
     
     def _partition_path(self, event_type: str, dt: datetime) -> str:
         """Generate partition path for event_type and datetime."""
@@ -308,42 +338,30 @@ class EventTypeParquetWriter:
             return
         
         try:
-            # Check if we need to rotate file
             file_key = f"{event_type}_{hour_dt}"
-            current_file = self.current_files.get(file_key)
-            file_size = self.file_sizes.get(file_key, 0)
-            
-            # Rotate if file too large or hour changed
-            if current_file and (file_size > self.rotate_bytes or self.current_hour.get(file_key) != hour_dt):
-                self.file_sequences[file_key] += 1
-                current_file = None
-            
-            # Generate file path
-            if not current_file:
-                current_file = self._file_path(event_type, hour_dt)
-                self.current_files[file_key] = current_file
-                self.current_hour[file_key] = hour_dt
-                self.file_sizes[file_key] = 0
-            
-            # Convert to PyArrow table
             schema = self.schemas[event_type]
-            
-            # Create PyArrow table - data is already converted to proper types
+
+            rotate = False
+            # rotate by rows or when hour changes (hour change is handled by file_key)
+            if file_key in self.writers:
+                if self.rows_written[file_key] >= self.rows_per_file:
+                    rotate = True
+
+            if rotate:
+                self.file_sequences[file_key] += 1
+                self._close_writer(file_key)
+
+            # Ensure a writer exists for this file_key
+            if file_key not in self.writers:
+                path = self._file_path(event_type, hour_dt)
+                self.current_files[file_key] = path
+                self.current_hour[file_key] = hour_dt
+                self._open_writer(file_key, schema, path)
+
+            # Write this batch as a new row group
             table = pa.Table.from_pylist(events, schema=schema)
-            
-            # Write to parquet
-            pq.write_table(
-                table,
-                current_file,
-                compression=self.compression,
-                use_dictionary=True,  # Better compression for repeated strings
-                write_statistics=True,
-                version='2.6'  # Latest parquet version for best features
-            )
-            
-            # Update file size tracking
-            if os.path.exists(current_file):
-                self.file_sizes[file_key] = os.path.getsize(current_file)
+            self.writers[file_key].write_table(table)
+            self.rows_written[file_key] += table.num_rows
             
         except Exception as e:
             # Log error but don't crash the writer
@@ -354,10 +372,13 @@ class EventTypeParquetWriter:
         with self.lock:
             for event_type in list(self.buffers.keys()):
                 self._flush_event_type(event_type)
+            # no-op for open writers; we keep them open to continue appending
     
     def close(self):
-        """Flush all buffers and close the writer."""
+        """Flush all buffers and close all open Parquet writers."""
         self.flush()
+        for key in list(self.writers.keys()):
+            self._close_writer(key)
     
     def __enter__(self):
         return self
