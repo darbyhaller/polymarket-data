@@ -94,7 +94,7 @@ backoff = BACKOFF_MIN  # Global backoff state
 # File handling now managed by parquet writer
 def fs_open():
     """Initialize parquet writer."""
-    init_writer(root=OUTDIR, batch_size=1000, max_buffer_mb=64, compression="snappy")
+    init_writer(root=OUTDIR)
     print(f"Initialized parquet writer at {OUTDIR}")
 
 def fs_health_check():
