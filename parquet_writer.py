@@ -359,7 +359,6 @@ class EventTypeParquetWriter:
                 self._open_writer(file_key, schema, path)
 
             # Write this batch as a new row group with optimal row group size
-            table = pa.Table.from_pylist(events, schema=schema)
             events.sort(key=lambda e: (e.get("asset_id", ""), e.get("timestamp", 0)))
             table = pa.Table.from_pylist(events, schema=schema)
             self.writers[file_key].write_table(table)
