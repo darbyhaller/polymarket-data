@@ -29,6 +29,7 @@ ensure_bucket(){
 ensure_sa_and_iam(){
   say "Ensuring SA $SA_EMAIL"
   gcloud iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1 || gcloud iam service-accounts create "$SA_NAME" --display-name="Polymarket VM SA"
+  sleep 3
   gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member="serviceAccount:$SA_EMAIL" --role="roles/storage.objectAdmin" >/dev/null || true
 }
 
