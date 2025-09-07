@@ -2,6 +2,9 @@
 
 ## 🔑 Quick Cheat Sheet (Most Used Commands)
 
+### Check deploy progress
+sudo journalctl -u google-startup-scripts.service -f
+
 ### SSH in
 ```bash
 gcloud compute ssh polymarket-vm --zone=us-central1-a
