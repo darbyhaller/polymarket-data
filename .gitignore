@@ -1,9 +1,7 @@
 temp
 *.jsonl
 *.json
-raw
-orderbook_parquet
-parquet_sync
+parquets
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
