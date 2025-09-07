@@ -298,9 +298,9 @@ SYNCUNIT
 
 cat >/etc/systemd/system/polymarket-sync.timer <<SYNCTIMER
 [Unit]
-Description=Run GCS sync hourly, offset by 5 minutes
+Description=Run GCS sync hourly, offset by 30 minutes
 [Timer]
-OnCalendar=*:05
+OnCalendar=*:30
 Persistent=true
 [Install]
 WantedBy=timers.target

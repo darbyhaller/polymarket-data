@@ -94,7 +94,6 @@ class EventTypeParquetWriter:
         self.file_sequences: Dict[str, int] = defaultdict(int)
         self.writers: Dict[str, pq.ParquetWriter] = {}
         self.rows_written: Dict[str, int] = defaultdict(int)
-        self.rows_per_file: int = 1_000_000  # rotate by rows (4x larger for ~100-300MB files)
         
         os.makedirs(root, exist_ok=True)
         
@@ -160,10 +159,13 @@ class EventTypeParquetWriter:
         }
     
     def _open_writer(self, file_key: str, schema: pa.Schema, path: str):
-        """Open a new ParquetWriter for the given file key."""
+        """Open a new ParquetWriter for the given file key with .inprogress pattern."""
         self._close_writer(file_key)  # just in case
+        
+        # Use .inprogress pattern for atomic writes
+        tmp_path = path + ".inprogress"
         self.writers[file_key] = pq.ParquetWriter(
-            path,
+            tmp_path,
             schema=schema,
             compression=self.compression,
             use_dictionary=True,
@@ -171,15 +173,52 @@ class EventTypeParquetWriter:
             version="2.6",
         )
         self.rows_written[file_key] = 0
+        # Store final path separately for atomic rename on close
+        self.current_files[file_key] = path
 
     def _close_writer(self, file_key: str):
-        """Close the ParquetWriter for the given file key."""
+        """Close the ParquetWriter and atomically rename from .inprogress to final path."""
         w = self.writers.pop(file_key, None)
         if w is not None:
             try:
                 w.close()
             except Exception:
                 pass
+            
+            # Atomic rename from .inprogress to final path
+            final_path = self.current_files.get(file_key)
+            if final_path:
+                tmp_path = final_path + ".inprogress"
+                try:
+                    os.replace(tmp_path, final_path)
+                except Exception as e:
+                    print(f"Atomic rename failed for {tmp_path} -> {final_path}: {e}")
+
+    def close_completed_hours(self, grace_minutes=15):
+        """Close writers that are older than current hour minus grace period.
+        
+        This prevents late events from causing file collisions by keeping writers
+        open for a grace period after their hour boundary.
+        """
+        from datetime import timedelta
+        
+        now = datetime.fromtimestamp(time.time(), timezone.utc)
+        # Close writers for hours that ended more than grace_minutes ago
+        cutoff_time = now.replace(minute=0, second=0, microsecond=0) - timedelta(minutes=grace_minutes)
+        
+        to_close = []
+        for key, hour_dt in list(self.current_hour.items()):
+            if hour_dt < cutoff_time:
+                to_close.append(key)
+        
+        if to_close:
+            print(f"Closing {len(to_close)} writers older than {cutoff_time} (grace period: {grace_minutes}min)")
+        
+        for key in to_close:
+            self._close_writer(key)
+            self.current_hour.pop(key, None)
+            self.current_files.pop(key, None)
+            self.rows_written.pop(key, None)
     
     def _partition_path(self, event_type: str, dt: datetime) -> str:
         """Generate partition path for event_type and datetime."""
@@ -348,6 +387,9 @@ class EventTypeParquetWriter:
             file_key = f"{event_type}_{hour_dt}"
             schema = self.schemas[event_type]
 
+            # REMOVED: Proactive closing of older hours - unsafe for late events
+            # Instead, rely on grace period in close_completed_hours()
+
             rotate = False
             # rotate by rows or when hour changes (hour change is handled by file_key)
             if file_key in self.writers:
@@ -361,7 +403,6 @@ class EventTypeParquetWriter:
             # Ensure a writer exists for this file_key
             if file_key not in self.writers:
                 path = self._file_path(event_type, hour_dt)
-                self.current_files[file_key] = path
                 self.current_hour[file_key] = hour_dt
                 self._open_writer(file_key, schema, path)
 
@@ -380,7 +421,7 @@ class EventTypeParquetWriter:
         with self.lock:
             for event_type in list(self.buffers.keys()):
                 self._flush_event_type(event_type)
-            # no-op for open writers; we keep them open to continue appending
+            self.close_completed_hours()
     
     def close(self):
         """Flush all buffers and close all open Parquet writers."""
@@ -425,5 +466,3 @@ def close_writer():
     if writer is not None:
         writer.close()
         writer = None
-
-        print(f"Verification error: {e}")

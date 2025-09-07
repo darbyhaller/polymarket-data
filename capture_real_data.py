@@ -188,6 +188,7 @@ def file_health_monitor():
             from parquet_writer import writer
             if writer:
                 writer.flush()
+                writer.close_completed_hours()
         except Exception as e:
             print(f"Parquet writer flush failed: {e}")
 
