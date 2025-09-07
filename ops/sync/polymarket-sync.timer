@@ -1,0 +1,10 @@
+[Unit]
+Description=Run sync hourly at :30
+
+[Timer]
+OnCalendar=*:30
+Persistent=true
+Unit=polymarket-sync.service
+
+[Install]
+WantedBy=timers.target

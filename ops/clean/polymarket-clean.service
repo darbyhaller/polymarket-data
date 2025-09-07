@@ -1,0 +1,9 @@
+[Unit]
+Description=Polymarket clean local parquet cache
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/polymarket/polymarket.env
+ExecStart=/usr/local/bin/clean_old_local.sh

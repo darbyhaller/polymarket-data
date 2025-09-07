@@ -1,0 +1,9 @@
+[Unit]
+Description=Polymarket sync to GCS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/polymarket/polymarket.env
+ExecStart=/usr/local/bin/sync_to_gcs.sh
