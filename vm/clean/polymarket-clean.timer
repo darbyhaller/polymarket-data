@@ -1,10 +1,8 @@
 [Unit]
 Description=Run clean daily
-
 [Timer]
 OnCalendar=daily
 Persistent=true
 Unit=polymarket-clean.service
-
 [Install]
 WantedBy=timers.target

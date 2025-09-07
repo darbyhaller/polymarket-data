@@ -1,18 +1,16 @@
-# /etc/systemd/system/polymarket.service
 [Unit]
 Description=Polymarket WebSocket Ingest
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=simple
 EnvironmentFile=/etc/polymarket/polymarket.env
 User=root
-# Use a shell so $APP_DIR and $ENTRYPOINT from the env file are expanded
+ExecStartPre=/usr/bin/env bash -lc 'test -x "$APP_DIR/.venv/bin/python"'
+ExecStartPre=/usr/bin/env bash -lc 'test -f "$APP_DIR/$ENTRYPOINT"'
 ExecStart=/usr/bin/env bash -lc 'cd "$APP_DIR" && exec "$APP_DIR/.venv/bin/python" "$APP_DIR/$ENTRYPOINT"'
 Restart=always
 RestartSec=3
 LimitNOFILE=262144
-
 [Install]
 WantedBy=multi-user.target

@@ -121,18 +121,17 @@ if [ -f "$REQUIREMENTS_FILE" ]; then
 fi
 
 # --- 6) Install services/scripts from repo (matches your new ops/ layout) ---
-install -m 0755 -D "$APP_DIR/ops/sync/sync_to_gcs.sh"   /usr/local/bin/sync_to_gcs.sh
-install -m 0755 -D "$APP_DIR/ops/clean/clean_old_local.sh" /usr/local/bin/clean_old_local.sh
-
-install -m 0644 -D "$APP_DIR/ops/startup/polymarket.service" /etc/systemd/system/polymarket.service
-install -m 0644 -D "$APP_DIR/ops/sync/polymarket-sync.service" /etc/systemd/system/polymarket-sync.service
-install -m 0644 -D "$APP_DIR/ops/sync/polymarket-sync.timer"   /etc/systemd/system/polymarket-sync.timer
-install -m 0644 -D "$APP_DIR/ops/clean/polymarket-clean.service" /etc/systemd/system/polymarket-clean.service
-install -m 0644 -D "$APP_DIR/ops/clean/polymarket-clean.timer"   /etc/systemd/system/polymarket-clean.timer
-
+install -m 0755 -D "$APP_DIR/vm/sync/sync_to_gcs.sh" /usr/local/bin/sync_to_gcs.sh
+install -m 0755 -D "$APP_DIR/vm/clean/clean_old_local.sh" /usr/local/bin/clean_old_local.sh
+install -m 0644 -D "$APP_DIR/vm/polymarket.service" /etc/systemd/system/polymarket.service
+install -m 0644 -D "$APP_DIR/vm/sync/polymarket-sync.service" /etc/systemd/system/polymarket-sync.service
+install -m 0644 -D "$APP_DIR/vm/sync/polymarket-sync.timer" /etc/systemd/system/polymarket-sync.timer
+install -m 0644 -D "$APP_DIR/vm/clean/polymarket-clean.service" /etc/systemd/system/polymarket-clean.service
+install -m 0644 -D "$APP_DIR/vm/clean/polymarket-clean.timer" /etc/systemd/system/polymarket-clean.timer
 systemctl daemon-reload
 systemctl enable --now polymarket
 systemctl enable --now polymarket-sync.timer
 systemctl enable --now polymarket-clean.timer
+
 
 log "Startup complete."

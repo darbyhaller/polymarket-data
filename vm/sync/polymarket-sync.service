@@ -6,4 +6,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/polymarket/polymarket.env
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/usr/bin/env bash -lc 'command -v gcloud >/dev/null'
 ExecStart=/usr/local/bin/sync_to_gcs.sh
