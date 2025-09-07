@@ -284,8 +284,7 @@ DST="gs://\$BUCKET/parquets"
 CURHOUR=\\\$(date -u +%H)
 # Exclude current UTC hour to avoid uploading in-progress parquet files
 # New structure: event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet
-gcloud storage rsync -r -x "hour=\\\${CURHOUR}(/|\$)" "\\\$SRC" "\\\$DST"
-SYNC
+gcloud storage rsync -r -x "(\.inprogress$|hour=${CURHOUR}(/|$))" "$SRC" "$DST"SYNC
 chmod +x /usr/local/bin/sync_to_gcs.sh
 
 cat >/etc/systemd/system/polymarket-sync.service <<SYNCUNIT
