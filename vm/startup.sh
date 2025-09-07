@@ -27,7 +27,7 @@ if [ -n "$META_VAL" ]; then
 fi
 
 # ensure file exists even if metadata missing
-: > "$ENV_FILE" 2>/dev/null || true
+[ -f "$ENV_FILE" ] || : > "$ENV_FILE"
 
 # export all vars from env file (if any)
 set -a
@@ -91,7 +91,7 @@ if [ ! -f "$SWAPFILE" ]; then
   fallocate -l 2G "$SWAPFILE"
   chmod 600 "$SWAPFILE"
   mkswap "$SWAPFILE"
-  echo "$SWAPFILE none swap sw 0 0" >> /etc/fstab
+  grep -q "^$SWAPFILE " /etc/fstab || echo "$SWAPFILE none swap sw 0 0" >> /etc/fstab
 fi
 swapon -a || true
 

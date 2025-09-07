@@ -49,7 +49,7 @@ ensure_vm(){
       -e "s|{{BUCKET}}|$BUCKET|g" \
       -e "s|{{LOCAL_RETENTION_DAYS}}|$LOCAL_RETENTION_DAYS|g" \
       -e "s|{{DATA_DISK_NAME}}|$DATA_DISK_NAME|g" \
-      ops/polymarket.env.template > "$tmp_env"
+      vm/polymarket.env.template > "$tmp_env"
   META=("polymarket-env=$(python3 - <<'PY' < "$tmp_env"
 import sys,base64; print(base64.b64encode(sys.stdin.read().encode()).decode())
 PY
@@ -64,11 +64,11 @@ PY
     gcloud compute instances create "$VM_NAME" --zone "$ZONE" "${MF[@]}" --service-account "$SA_EMAIL" "${SC[@]}" \
       --create-disk=auto-delete=yes,boot=yes,image-family=ubuntu-2204-lts,image-project=ubuntu-os-cloud \
       --disk=name="$DATA_DISK_NAME",mode=rw,auto-delete=no \
-      --metadata-from-file startup-script=ops/startup/startup.sh \
+      --metadata-from-file startup-script=vm/startup.sh \
       --metadata "${META[@]}"
   else
     say "Updating startup + metadata; ensure disk attached"
-    gcloud compute instances add-metadata "$VM_NAME" --zone "$ZONE" --metadata-from-file startup-script=ops/startup/startup.sh --metadata "${META[@]}"
+    gcloud compute instances add-metadata "$VM_NAME" --zone "$ZONE" --metadata-from-file startup-script=vm/startup.sh --metadata "${META[@]}"
     gcloud compute instances describe "$VM_NAME" --zone "$ZONE" --format="get(disks[].source)" | grep -q "/$DATA_DISK_NAME$" || gcloud compute instances attach-disk "$VM_NAME" --disk "$DATA_DISK_NAME" --zone "$ZONE"
     gcloud compute instances reset "$VM_NAME" --zone "$ZONE"
   fi
