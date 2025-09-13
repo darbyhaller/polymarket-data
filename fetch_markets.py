@@ -15,35 +15,64 @@ CACHE_FILE = "markets_cache.json"
 CURSOR_FILE = "markets_cursor.txt"
 
 def load_cache():
-    """Load existing market cache and cursor state."""
+    """Load existing market cache and cursor state from JSONL format."""
     markets_data = {}
     last_cursor = ""
     
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, 'r') as f:
-                cache = json.load(f)
-                markets_data = cache.get('markets', {})
-                last_cursor = cache.get('last_cursor', '')
-                print(f"Loaded {len(markets_data)} cached markets, last cursor: {last_cursor[:20]}...")
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    data = json.loads(line)
+                    if data.get('_type') == 'metadata':
+                        last_cursor = data.get('last_cursor', '')
+                    elif data.get('_type') == 'market':
+                        condition_id = data.pop('condition_id', None)
+                        data.pop('_type', None)  # Remove the _type field
+                        if condition_id:
+                            markets_data[condition_id] = data
+                            
+            print(f"Loaded {len(markets_data)} cached markets, last cursor: {last_cursor[:20]}...")
         except Exception as e:
-            print(f"Error loading cache: {e}")
+            # Try loading as old format for backward compatibility
+            try:
+                with open(CACHE_FILE, 'r') as f:
+                    cache = json.load(f)
+                    markets_data = cache.get('markets', {})
+                    last_cursor = cache.get('last_cursor', '')
+                    print(f"Loaded {len(markets_data)} cached markets from old format")
+            except:
+                print(f"Error loading cache: {e}")
     
     return markets_data, last_cursor
 
 def save_cache(markets_data, cursor):
-    """Save market cache and cursor state."""
-    cache = {
-        'markets': markets_data,
-        'last_cursor': cursor,
-        'updated_at': datetime.utcnow().isoformat(),
-        'total_markets': len(markets_data)
-    }
-    
+    """Save market cache and cursor state in JSONL format (one market per line)."""
     try:
         with open(CACHE_FILE, 'w') as f:
-            json.dump(cache, f, separators=(',', ':'))
-        print(f"Saved {len(markets_data)} markets to cache")
+            # First line: metadata
+            metadata = {
+                'last_cursor': cursor,
+                'updated_at': datetime.utcnow().isoformat(),
+                'total_markets': len(markets_data),
+                '_type': 'metadata'
+            }
+            f.write(json.dumps(metadata, separators=(',', ':')) + '\n')
+            
+            # Each market on its own line
+            for condition_id, market in markets_data.items():
+                market_with_id = {
+                    'condition_id': condition_id,
+                    '_type': 'market',
+                    **market
+                }
+                f.write(json.dumps(market_with_id, separators=(',', ':')) + '\n')
+                
+        print(f"Saved {len(markets_data)} markets to cache (JSONL format)")
     except Exception as e:
         print(f"Error saving cache: {e}")
 

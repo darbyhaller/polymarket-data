@@ -12,8 +12,11 @@ import os
 import sys
 from typing import Dict, Any
 
-# Update this import if your file name is different (e.g., markets_cache.py)
-from fetch_markets import load_cache, CACHE_FILE  # <-- change module name if needed
+# Import from parent directory
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from fetch_markets import load_cache, CACHE_FILE
 
 
 def _extract_markets_from_obj(obj: Any) -> Dict[str, Any]:

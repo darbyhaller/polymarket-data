@@ -27,6 +27,11 @@ import pyarrow.parquet as pq
 import pyarrow as pa
 from tqdm import tqdm
 
+# Import the asset-to-question mapping function
+sys.path.append(os.path.dirname(__file__))
+from asset_id_to_question import build_token_to_question_map
+from tqdm import tqdm
+
 # ---------- Config ----------
 PRICE_SCALE = 10000.0     # uint32 -> float
 OUTAGE_MS = 1000
@@ -91,15 +96,12 @@ def get_schema_for_event_type(event_type: str) -> pa.Schema:
 
 def list_parquet_files(root, event_type):
     base = os.path.join(root, f"event_type={event_type}")
-    return [p for p in glob(os.path.join(base, "**", "*.parquet"), recursive=True)
-            if not p.endswith(".inprogress")]
+    return sorted([p for p in glob(os.path.join(base, "**", "*.parquet"), recursive=True)
+            if not p.endswith(".inprogress")])
 
-def read_latest_book_per_asset(root, verbose=False):
+def read_latest_book_per_asset(root, verbose=False, asset_to_question=None):
     files = list_parquet_files(root, "book")
-    if verbose:
-        print(f"[init] book files: {len(files)}", file=sys.stderr)
-    if not files:
-        return {}
+    print(f"[init] book files: {len(files)}", file=sys.stderr)
 
     cols = ["timestamp", "asset_id", "market_title", "outcome", "bids", "asks"]
     latest = {}  # asset_id -> (timestamp, rowdict)
@@ -136,8 +138,10 @@ def read_latest_book_per_asset(root, verbose=False):
         for lvl in (row["asks"] or []):
             p = normalize_int(lvl.get("price", 0)); s = normalize_int(lvl.get("size", 0))
             amap[p] = s
+        # Use question if available, otherwise fallback to market_title
+        question = asset_to_question.get(a, row["market_title"])
         books[a] = {
-            "market_title": row["market_title"],
+            "market_title": question,
             "outcome": row["outcome"],
             "bids": bmap,
             "asks": amap,
@@ -175,7 +179,13 @@ def load_all_price_changes(root, verbose=False):
     return rows
 
 def compute_l1_updates(root, out_path, pretty=False, verbose=False):
-    books = read_latest_book_per_asset(root, verbose=verbose)
+    # Build asset-to-question mapping
+    if verbose:
+        print("[mapping] Building asset ID to question mapping...", file=sys.stderr)
+    
+    asset_to_question = build_token_to_question_map()
+
+    books = read_latest_book_per_asset(root, verbose=verbose, asset_to_question=asset_to_question)
     pc_rows = load_all_price_changes(root, verbose=verbose)
 
     last_pc_ts = None
@@ -203,14 +213,17 @@ def compute_l1_updates(root, out_path, pretty=False, verbose=False):
         mt = row["market_title"] or ""
         oc = row["outcome"] or ""
         changes = row["changes"] or []
+        
+        # Get the actual question from our mapping, fallback to market_title
+        question = asset_to_question.get(aid, mt)
 
         book = books.get(aid)
         if book is None:
-            book = {"market_title": mt, "outcome": oc, "bids": {}, "asks": {}, "best_bid": None, "best_ask": None}
+            book = {"market_title": question, "outcome": oc, "bids": {}, "asks": {}, "best_bid": None, "best_ask": None}
             books[aid] = book
         else:
-            if mt and not book["market_title"]:
-                book["market_title"] = mt
+            if question and not book["market_title"]:
+                book["market_title"] = question
             if oc and not book["outcome"]:
                 book["outcome"] = oc
 
