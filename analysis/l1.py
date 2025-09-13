@@ -6,325 +6,214 @@ Compute L1 (best bid/ask) updates from Polymarket parquet dumps.
 - Initializes per-asset order books using the *latest* book snapshot for each asset.
 - Processes price_change events strictly in ascending `timestamp` order.
 - Emits JSONL events:
-  - {event_type: "l1_update", timestamp, asset_id, market_title, outcome, side: "bid"|"ask", price}
+  - {event_type: "l1_update", timestamp, asset_id, market_title, outcome, side: "buy"|"sell", price}
   - {event_type: "outage", timestamp}  (timestamp = start of outage = prev_ts + 1000)
 - Ignores *.inprogress temp files.
 
 Assumptions:
 - Parquet writer stored prices as uint32 = price * 10000, sizes as uint64 = size * 10000.
-- `price_change.changes[].size` is treated as the *absolute* remaining size at that price level
-  (0 removes the level). If instead it is a delta in your feed, switch UPDATE_MODE below.
 
 Usage:
-    python l1.py --root ./parquets --out l1.jsonl
+    python analysis/l1.py --root ./parquets --out l1.jsonl --verbose
 """
 
 import argparse
 import json
-import math
 import os
 import sys
 from glob import glob
-from collections import defaultdict
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 
 # ---------- Config ----------
 PRICE_SCALE = 10000.0     # uint32 -> float
-SIZE_SCALE = 10000.0      # uint64 -> float (not used for output, but used to filter > 0 levels)
 OUTAGE_MS = 1000
 
 def u32_to_price(u):
-    try:
-        return round((int(u) / PRICE_SCALE), 4)
-    except Exception:
-        return 0.0
+    return round(int(u) / PRICE_SCALE, 4)
 
 def normalize_int(x):
-    try:
-        return int(x)
-    except Exception:
-        return 0
-
-def is_valid_level(sz_uint):
-    """Level is considered present if size > 0."""
-    try:
-        return int(sz_uint) > 0
-    except Exception:
-        return False
+    return int(x)
 
 def list_parquet_files(root, event_type):
-    """List finalized parquet files for a given event_type partition."""
     base = os.path.join(root, f"event_type={event_type}")
-    # Recursively find *.parquet (ignore *.inprogress)
     return [p for p in glob(os.path.join(base, "**", "*.parquet"), recursive=True)
             if not p.endswith(".inprogress")]
 
-def read_latest_book_per_asset(root):
-    """
-    Build initial book state per asset from the *latest* book snapshot per asset_id (by timestamp).
-    Returns:
-      books: dict[asset_id] -> {
-          "market_title": str,
-          "outcome": str,
-          "bids": dict[price_int] -> size_uint,
-          "asks": dict[price_int] -> size_uint,
-          "best_bid": Optional[int price_int],
-          "best_ask": Optional[int price_int],
-      }
-    """
+def read_latest_book_per_asset(root, verbose=False):
     files = list_parquet_files(root, "book")
+    if verbose:
+        print(f"[init] book files: {len(files)}", file=sys.stderr)
     if not files:
         return {}
 
-    # We only read needed columns
     cols = ["timestamp", "asset_id", "market_title", "outcome", "bids", "asks"]
-    # Track the latest row per asset by timestamp
-    latest = {}  # asset_id -> (timestamp, row-like dict)
+    latest = {}  # asset_id -> (timestamp, rowdict)
 
     for fp in files:
-        try:
-            table = pq.read_table(fp, columns=cols)
-        except Exception:
-            # Skip any corrupt/partial files
-            continue
+        table = pq.read_table(fp, columns=cols)
         if table.num_rows == 0:
             continue
-
-        # Convert to Python-friendly structure just for the latest rows
-        # We'll iterate rows and keep the max timestamp per asset
-        ts_arr = table.column("timestamp")
-        aid_arr = table.column("asset_id")
-        mt_arr = table.column("market_title")
-        oc_arr = table.column("outcome")
-        bids_arr = table.column("bids")
-        asks_arr = table.column("asks")
-
+        ts, aid, mt, oc, bids, asks = [table[c] for c in cols]
         for i in range(table.num_rows):
-            ts = normalize_int(ts_arr[i].as_py())
-            aid = aid_arr[i].as_py()
-            if not aid:
+            t = normalize_int(ts[i].as_py()); a = aid[i].as_py()
+            if not a: 
                 continue
-            prev = latest.get(aid)
-            if prev is None or ts > prev[0]:
-                row = {
-                    "timestamp": ts,
-                    "asset_id": aid,
-                    "market_title": mt_arr[i].as_py() or "",
-                    "outcome": oc_arr[i].as_py() or "",
-                    "bids": bids_arr[i].as_py() or [],
-                    "asks": asks_arr[i].as_py() or [],
-                }
-                latest[aid] = (ts, row)
+            prev = latest.get(a)
+            if prev is None or t > prev[0]:
+                latest[a] = (t, {
+                    "timestamp": t,
+                    "asset_id": a,
+                    "market_title": (mt[i].as_py() or ""),
+                    "outcome": (oc[i].as_py() or ""),
+                    "bids": bids[i].as_py() or [],
+                    "asks": asks[i].as_py() or [],
+                })
 
     books = {}
-    for aid, (_, row) in latest.items():
-        # Build price->size maps
-        bids = {}
-        for level in (row.get("bids") or []):
-            try:
-                p = normalize_int(level.get("price", 0))
-                s = normalize_int(level.get("size", 0))
-                if is_valid_level(s):
-                    bids[p] = s
-            except Exception:
-                continue
-        asks = {}
-        for level in (row.get("asks") or []):
-            try:
-                p = normalize_int(level.get("price", 0))
-                s = normalize_int(level.get("size", 0))
-                if is_valid_level(s):
-                    asks[p] = s
-            except Exception:
-                continue
-
-        best_bid = max(bids.keys()) if bids else None
-        best_ask = min(asks.keys()) if asks else None
-
-        books[aid] = {
-            "market_title": row.get("market_title", ""),
-            "outcome": row.get("outcome", ""),
-            "bids": bids,
-            "asks": asks,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
+    for a, (_, row) in latest.items():
+        bmap, amap = {}, {}
+        for lvl in (row["bids"] or []):
+            p = normalize_int(lvl.get("price", 0)); s = normalize_int(lvl.get("size", 0))
+            bmap[p] = s
+        for lvl in (row["asks"] or []):
+            p = normalize_int(lvl.get("price", 0)); s = normalize_int(lvl.get("size", 0))
+            amap[p] = s
+        books[a] = {
+            "market_title": row["market_title"],
+            "outcome": row["outcome"],
+            "bids": bmap,
+            "asks": amap,
+            "best_bid": max(bmap) if bmap else None,
+            "best_ask": min(amap) if amap else None,
         }
-
+    print(f"[init] books built: {len(books)} assets", file=sys.stderr)
     return books
 
-def load_all_price_changes(root):
-    """
-    Load all price_change rows and return a list of dicts sorted by `timestamp`.
-    Each dict contains: timestamp, asset_id, market_title, outcome, changes(list).
-    """
+def load_all_price_changes(root, verbose=False):
+    print('hi')
     files = list_parquet_files(root, "price_change")
+    print(f"[load] price_change files: {len(files)}", file=sys.stderr)
     rows = []
-    if not files:
-        return rows
-
     cols = ["timestamp", "asset_id", "market_title", "outcome", "changes"]
-
+    total_rows = 0
     for fp in files:
-        try:
-            table = pq.read_table(fp, columns=cols)
-        except Exception:
-            continue
+        table = pq.read_table(fp, columns=cols)
+        total_rows += table.num_rows
         if table.num_rows == 0:
             continue
-
-        ts_arr = table.column("timestamp")
-        aid_arr = table.column("asset_id")
-        mt_arr = table.column("market_title")
-        oc_arr = table.column("outcome")
-        ch_arr = table.column("changes")
-
+        ts, aid, mt, oc, ch = [table[c] for c in cols]
         for i in range(table.num_rows):
-            ts = normalize_int(ts_arr[i].as_py())
-            aid = aid_arr[i].as_py()
-            if not aid:
+            t = normalize_int(ts[i].as_py()); a = aid[i].as_py()
+            if not a:
                 continue
-            changes = ch_arr[i].as_py() or []
             rows.append({
-                "timestamp": ts,
-                "asset_id": aid,
-                "market_title": mt_arr[i].as_py() or "",
-                "outcome": oc_arr[i].as_py() or "",
-                "changes": changes
+                "timestamp": t,
+                "asset_id": a,
+                "market_title": (mt[i].as_py() or ""),
+                "outcome": (oc[i].as_py() or ""),
+                "changes": ch[i].as_py() or []
             })
-
-    # Sort strictly by timestamp
     rows.sort(key=lambda r: r["timestamp"])
+    if verbose:
+        print(f"[load] price_change rows loaded: {len(rows)} (raw: {total_rows})", file=sys.stderr)
     return rows
 
-def compute_l1_updates(root, out_path, pretty=False):
-    # 1) Initialize books from latest book per asset
-    books = read_latest_book_per_asset(root)
+def compute_l1_updates(root, out_path, pretty=False, verbose=False):
+    books = read_latest_book_per_asset(root, verbose=verbose)
+    pc_rows = load_all_price_changes(root, verbose=verbose)
 
-    # 2) Load and sort price_change events
-    pc_rows = load_all_price_changes(root)
-
-    # 3) Iterate price_change events to produce updates + outages
     last_pc_ts = None
     emitted = 0
+    outages = 0
+    updates = 0
 
-    # Open writer (stdout or file)
     out_fh = sys.stdout if out_path == "-" else open(out_path, "w", encoding="utf-8")
-
     def emit(obj):
         nonlocal emitted
         if pretty:
-            out_fh.write(json.dumps(obj, ensure_ascii=False, sort_keys=False, indent=0).strip() + "\n")
+            out_fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
         else:
             out_fh.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
         emitted += 1
+    
+    for row in pc_rows:
+        ts = row["timestamp"]
+        if last_pc_ts is not None and ts - last_pc_ts > OUTAGE_MS:
+            emit({"event_type": "outage", "timestamp": last_pc_ts + OUTAGE_MS})
+            outages += 1
+        last_pc_ts = ts
 
-    try:
-        for row in pc_rows:
-            ts = row["timestamp"]
+        aid = row["asset_id"]
+        mt = row["market_title"] or ""
+        oc = row["outcome"] or ""
+        changes = row["changes"] or []
 
-            # Outage detection starts from the first price_change (t0)
-            if last_pc_ts is not None and ts - last_pc_ts > OUTAGE_MS:
-                # Emit outage at the time the gap *exceeded* 1000ms
-                outage_ts = last_pc_ts + OUTAGE_MS
-                emit({"event_type": "outage", "timestamp": outage_ts})
+        book = books.get(aid)
+        if book is None:
+            book = {"market_title": mt, "outcome": oc, "bids": {}, "asks": {}, "best_bid": None, "best_ask": None}
+            books[aid] = book
+        else:
+            if mt and not book["market_title"]:
+                book["market_title"] = mt
+            if oc and not book["outcome"]:
+                book["outcome"] = oc
 
-            last_pc_ts = ts
+        bids, asks = book["bids"], book["asks"]
 
-            aid = row["asset_id"]
-            mt = row["market_title"] or ""
-            oc = row["outcome"] or ""
-            changes = row["changes"] or []
-
-            # Ensure a book entry exists even if no prior book snapshot
-            book = books.get(aid)
-            if book is None:
-                book = {
-                    "market_title": mt,
-                    "outcome": oc,
-                    "bids": {},
-                    "asks": {},
-                    "best_bid": None,
-                    "best_ask": None,
-                }
-                books[aid] = book
+        for ch in changes:
+            side = normalize_side(ch.get("side"))
+            if not side:
+                continue
+            p_int = normalize_int(ch.get("price", 0))
+            s_uint = normalize_int(ch.get("size", 0))
+            levels = bids if side == "buy" else asks
+            if ch["size"] > 0:
+                levels[p_int] = s_uint
             else:
-                # Keep freshest non-empty metadata
-                if mt and not book["market_title"]:
-                    book["market_title"] = mt
-                if oc and not book["outcome"]:
-                    book["outcome"] = oc
+                levels.pop(p_int, None)
 
-            bids = book["bids"]
-            asks = book["asks"]
+        prev_bid, prev_ask = book["best_bid"], book["best_ask"]
+        new_bid = max(bids) if bids else None
+        new_ask = min(asks) if asks else None
 
-            # Apply all changes in this event
-            for ch in changes:
-                try:
-                    side = (ch.get("side") or "").lower()
-                    p_int = normalize_int(ch.get("price", 0))
-                    s_uint = normalize_int(ch.get("size", 0))
-                except Exception:
-                    continue
-                if side not in ("bid", "ask"):
-                    continue
+        if new_bid != prev_bid and new_bid is not None:
+            emit({
+                "event_type": "l1_update",
+                "timestamp": ts,
+                "asset_id": aid,
+                "market_title": book["market_title"],
+                "outcome": book["outcome"],
+                "side": "buy",
+                "price": new_bid,
+            })
+            updates += 1
+        if new_ask != prev_ask and new_ask is not None:
+            emit({
+                "event_type": "l1_update",
+                "timestamp": ts,
+                "asset_id": aid,
+                "market_title": book["market_title"],
+                "outcome": book["outcome"],
+                "side": "sell",
+                "price": new_ask,
+            })
+            updates += 1
 
-                levels = bids if side == "bid" else asks
+        book["best_bid"], book["best_ask"] = new_bid, new_ask
 
-                if is_valid_level(s_uint):
-                    levels[p_int] = s_uint
-                else:
-                    # Remove level when size == 0
-                    if p_int in levels:
-                        del levels[p_int]
-
-            # Recompute bests
-            prev_best_bid = book["best_bid"]
-            prev_best_ask = book["best_ask"]
-            new_best_bid = max(bids.keys()) if bids else None
-            new_best_ask = min(asks.keys()) if asks else None
-
-            # Emit updates for changed sides
-            if new_best_bid != prev_best_bid and new_best_bid is not None:
-                emit({
-                    "event_type": "l1_update",
-                    "timestamp": ts,
-                    "asset_id": aid,
-                    "market_title": book["market_title"],
-                    "outcome": book["outcome"],
-                    "side": "bid",
-                    "price": u32_to_price(new_best_bid),
-                })
-            if new_best_ask != prev_best_ask and new_best_ask is not None:
-                emit({
-                    "event_type": "l1_update",
-                    "timestamp": ts,
-                    "asset_id": aid,
-                    "market_title": book["market_title"],
-                    "outcome": book["outcome"],
-                    "side": "ask",
-                    "price": u32_to_price(new_best_ask),
-                })
-
-            # Commit new bests
-            book["best_bid"] = new_best_bid
-            book["best_ask"] = new_best_ask
-
-    finally:
-        if out_fh is not sys.stdout:
-            out_fh.close()
-
+    print(f"[done] emitted: {emitted} (updates: {updates}, outages: {outages})", file=sys.stderr)
     return emitted
 
 def main():
     ap = argparse.ArgumentParser(description="Generate L1 updates & outage events from Polymarket parquet dumps.")
-    ap.add_argument("--root", default="./parquets", help="Root folder containing parquet partitions (default: ./parquets)")
-    ap.add_argument("--out", default="l1.jsonl", help="Output path (JSONL). Use '-' for stdout. (default: l1.jsonl)")
-    ap.add_argument("--pretty", action="store_true", help="Pretty-print JSON (slower, bigger files)")
+    ap.add_argument("--root", default="./parquets", help="Root folder with parquet partitions")
+    ap.add_argument("--out", default="l1.jsonl", help="Output JSONL path; use '-' for stdout")
+    ap.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    ap.add_argument("--verbose", action="store_true", help="Log progress to stderr")
     args = ap.parse_args()
 
-    emitted = compute_l1_updates(args.root, args.out, pretty=args.pretty)
+    emitted = compute_l1_updates(args.root, args.out, pretty=args.pretty, verbose=args.verbose)
     print(f"Wrote {emitted} events to {args.out}", file=sys.stderr)
 
 if __name__ == "__main__":
