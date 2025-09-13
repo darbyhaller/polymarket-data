@@ -38,11 +38,11 @@ should_stop = Event()
 last_message_time = 0.0
 backoff = BACKOFF_MIN  # Global backoff state
 
-def update_asset_mappings_from_api(force_update=False):
+def update_asset_mappings_from_api():
     global subs_version, previous_allowed_asset_ids
     new_assets = 0
     try:
-        mappings = get_tradeable_asset_mappings(force_update=force_update)
+        mappings = get_tradeable_asset_mappings(force_update=False)
         with data_lock:
             old_size = len(allowed_asset_ids)
             # Store previous set for comparison
@@ -71,16 +71,6 @@ def update_asset_mappings_from_api(force_update=False):
                   f"{mappings['tradeable_markets']} tradeable, "
                   f"{len(allowed_asset_ids)} subscribed assets")
             
-            # Debug logging to understand why assets_changed is True
-            if assets_changed:
-                added = allowed_asset_ids - previous_set
-                removed = previous_set - allowed_asset_ids
-                print(f"Assets changed: +{len(added)} added, -{len(removed)} removed")
-                if len(added) <= 10:
-                    print(f"Added assets: {list(added)}")
-                if len(removed) <= 10:
-                    print(f"Removed assets: {list(removed)}")
-                  
         if assets_changed:
             with ws_lock:
                 subs_version += 1
@@ -90,18 +80,11 @@ def update_asset_mappings_from_api(force_update=False):
         print(f"Error updating asset mappings: {e}")
     return max(0, new_assets)
 
-def fetch_markets_and_populate_data(initial=False):
-    if initial:
-        print("Initial market data load...")
-    else:
-        print("Periodic market update...")
-    update_asset_mappings_from_api(force_update=False)
-
 def markets_poll_loop():
     while not should_stop.is_set():
         if should_stop.wait(MARKETS_UPDATE_INTERVAL):
             break
-        fetch_markets_and_populate_data(initial=False)
+        update_asset_mappings_from_api()
 
 def file_health_monitor():
     """Monitor parquet writer health."""
@@ -168,34 +151,32 @@ def on_message(ws, msg):
 
         events = payload if isinstance(payload, list) else [payload]
         for d in events:
-            et = d.get("event_type", "unknown")
-            aid = d.get("asset_id")
+            et = d["event_type"]
+            aid = d["asset_id"]
             with data_lock:
                 if aid not in allowed_asset_ids:
                     continue
                 outcome = asset_outcome.get(aid, "")
+            market_hash = hash((aid, d.get('market')))
+            # SAVE OUTCOME,
             base = {
                 "recv_ts_ms": recv_ms,
-                "asset_id": aid,
-                "market": d.get("market"),
-                "outcome": outcome,
+                "market_hash": market_hash,
+                "timestamp": d.get("timestamp"),
             }
             if et == "book":
                 base.update({
                     "bids": d.get("bids") or d.get("buys") or [],
                     "asks": d.get("asks") or d.get("sells") or [],
-                    "timestamp": d.get("timestamp"),
                 })
             elif et == "price_change":
                 base.update({
                     "changes": d.get("changes", []),
-                    "timestamp": d.get("timestamp"),
                 })
             elif et == "tick_size_change":
                 base.update({
                     "old_tick_size": d.get("old_tick_size"),
                     "new_tick_size": d.get("new_tick_size"),
-                    "timestamp": d.get("timestamp"),
                 })
             elif et == "last_trade_price":
                 base.update({
@@ -203,7 +184,6 @@ def on_message(ws, msg):
                     "size": d.get("size"),
                     "side": d.get("side"),
                     "fee_rate_bps": d.get("fee_rate_bps"),
-                    "timestamp": d.get("timestamp"),
                 })
             for k, v in d.items():
                 if k not in base:
@@ -300,7 +280,7 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
 
     init_writer(root=OUTDIR)
-    fetch_markets_and_populate_data(initial=True)
+    update_asset_mappings_from_api()
     threading.Thread(target=markets_poll_loop, daemon=True).start()
     threading.Thread(target=file_health_monitor, daemon=True).start()
 

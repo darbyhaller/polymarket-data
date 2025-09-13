@@ -7,4 +7,4 @@ df = pd.read_parquet(filename)
 print(df.dtypes)
 print([len(c) for c in df['changes']])
 
-print(df.head())
+print(df['market'])

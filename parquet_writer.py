@@ -18,7 +18,6 @@ DEFAULTS = {
     "compression": os.getenv("PM_COMPRESSION", "zstd"),
     "batch_size": int(os.getenv("PM_BATCH_SIZE", "200000")),     # events buffered per type before flush
     "row_group_size": int(os.getenv("PM_ROW_GROUP_SIZE", "200000")),  # rows per row-group
-    "max_buffer_mb": int(os.getenv("PM_MAX_BUFFER_MB", "256")),  # memory guard across buffers
     "rows_per_file": int(os.getenv("PM_ROWS_PER_FILE", "1000000")) # rotate file around this many rows
 }
 
@@ -45,7 +44,6 @@ class EventTypeParquetWriter:
         self,
         root: str,
         batch_size: int = DEFAULTS["batch_size"],
-        max_buffer_mb: int = DEFAULTS["max_buffer_mb"],
         rotate_mb: int = 256,
         compression: str = DEFAULTS["compression"],
         row_group_size: int = DEFAULTS["row_group_size"],
@@ -53,7 +51,6 @@ class EventTypeParquetWriter:
     ):
         self.root = root
         self.batch_size = batch_size
-        self.max_buffer_bytes = max_buffer_mb * 1024 * 1024
         self.rotate_bytes = rotate_mb * 1024 * 1024
         self.compression = compression
         self.row_group_size = row_group_size
@@ -286,19 +283,7 @@ class EventTypeParquetWriter:
                     normalized[field.name] = None
         
         return normalized
-    
-    def _estimate_event_size(self, event: Dict[str, Any]) -> int:
-        """Rough estimate of event size in bytes for memory management."""
-        # Quick estimation - much smaller now due to numeric encoding
-        size = 200  # Base overhead
-        for key, value in event.items():
-            if isinstance(value, str):
-                size += len(value.encode('utf-8'))
-            elif isinstance(value, list):
-                size += len(value) * 20  # Approximate for numeric arrays
-            else:
-                size += 8  # Numeric fields
-        return size
+
     
     def write(self, event: Dict[str, Any]):
         """Write a single event. Thread-safe and batched."""
@@ -309,18 +294,13 @@ class EventTypeParquetWriter:
             return
         
         normalized_event = self._normalize_event(event)
-        event_size = self._estimate_event_size(normalized_event)
         
         with self.lock:
             # Add to buffer
             self.buffers[event_type].append(normalized_event)
-            self.buffer_sizes[event_type] += event_size
             
             # Check if we should flush this event type
-            should_flush = (
-                len(self.buffers[event_type]) >= self.batch_size or
-                self.buffer_sizes[event_type] >= self.max_buffer_bytes
-            )
+            should_flush = len(self.buffers[event_type]) >= self.batch_size
             
             if should_flush:
                 self._flush_event_type(event_type)
