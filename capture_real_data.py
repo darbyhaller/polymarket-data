@@ -84,12 +84,6 @@ def update_asset_mappings_from_api(force_update=False):
         if assets_changed:
             with ws_lock:
                 subs_version += 1
-            if new_assets > 0:
-                print(f"Market update: +{new_assets} new assets")
-            elif new_assets < 0:
-                print(f"Market update: {abs(new_assets)} assets removed")
-            else:
-                print(f"Market update: asset composition changed (same count)")
         else:
             print("No asset changes detected - skipping resubscription")
     except Exception as e:
@@ -140,15 +134,7 @@ def on_open(ws):
     global sent_version, last_message_time, backoff
     last_message_time = time.time()
     backoff = BACKOFF_MIN  # Reset backoff on successful connection
-    print("WebSocket connected - reset backoff to minimum")
-    
-    # Parquet writer handles its own state management
-    print("WebSocket reconnected - parquet writer continues seamlessly")
-    
-    if not allowed_asset_ids:
-        print("No allowed asset IDs; closing")
-        ws.close()
-        return
+
     send_subscription(ws)
     with ws_lock:
         sent_version = subs_version
@@ -234,7 +220,6 @@ def on_close(ws, code, msg):
     print(f"WebSocket closed: {code} {msg}")
     global subscribed_asset_ids
     subscribed_asset_ids.clear()
-    print("Reset subscription state for reconnect")
 
 def subs_refresher(ws):
     """Resubscribe if markets thread changed allowed_asset_ids."""
@@ -294,7 +279,6 @@ def create_websocket():
         on_message=on_message,
         on_error=on_error,
         on_close=on_close,
-        # note: on_data not necessary if you only care about text frames
     )
 
 def run_websocket_with_timeout(ws):
