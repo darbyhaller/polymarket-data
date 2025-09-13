@@ -162,13 +162,11 @@ def compute_l1_updates(root, out_path, pretty=False, verbose=False):
         bids, asks = book["bids"], book["asks"]
 
         for ch in changes:
-            side = normalize_side(ch.get("side"))
-            if not side:
-                continue
-            p_int = normalize_int(ch.get("price", 0))
-            s_uint = normalize_int(ch.get("size", 0))
+            side = ch["side"]
+            p_int = normalize_int(ch["price"])
+            s_uint = normalize_int(ch["size"])
             levels = bids if side == "buy" else asks
-            if ch["size"] > 0:
+            if s_uint > 0:
                 levels[p_int] = s_uint
             else:
                 levels.pop(p_int, None)
