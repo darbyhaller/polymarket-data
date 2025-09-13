@@ -7,6 +7,7 @@ import sys
 import pyarrow.parquet as pq
 import pyarrow as pa
 import json
+import numpy as np
 
 
 def get_schema_for_event_type(event_type: str) -> pa.Schema:
@@ -78,47 +79,37 @@ def detect_event_type(file_path: str) -> str:
 
 def inspect_parquet_file(file_path: str, num_rows: int = 10, pretty: bool = True) -> None:
     """Inspect the first N rows of a parquet file."""
-    try:
-        # Detect event type and get appropriate schema
-        event_type = detect_event_type(file_path)
-        schema = get_schema_for_event_type(event_type)
+    # Detect event type and get appropriate schema
+    event_type = detect_event_type(file_path)
+    schema = get_schema_for_event_type(event_type)
+    
+    print(f"Detected event type: {event_type}")
+    
+    # Read the table with the detected schema
+    table = pq.read_table(file_path, schema=schema)
+    
+    print(f"File: {file_path}")
+    print(f"Total rows: {table.num_rows:,}")
+    print(f"Total columns: {len(table.schema)}")
+    print()
+    
+    # Get first N rows
+    if table.num_rows == 0:
+        print("No data rows found.")
+        return
         
-        print(f"Detected event type: {event_type}")
-        
-        # Read the table with the detected schema
-        table = pq.read_table(file_path, schema=schema)
-        
-        print(f"File: {file_path}")
-        print(f"Total rows: {table.num_rows:,}")
-        print(f"Total columns: {len(table.schema)}")
-        print()
-        
-        # Get first N rows
-        if table.num_rows == 0:
-            print("No data rows found.")
-            return
-            
-        rows_to_show = min(num_rows, table.num_rows)
-        sample_table = table.slice(0, rows_to_show)
-        
-        # Convert to Python objects
-        rows = sample_table.to_pylist()
-        
-        print(f"First {rows_to_show} rows:")
-        print("-" * 80)
-        
-        for i, row in enumerate(rows):
-            print(f"Row {i+1}:")
-            if pretty:
-                print(json.dumps(row, indent=2, ensure_ascii=False, default=str))
-            else:
-                print(json.dumps(row, ensure_ascii=False, default=str))
-            print()
-            
-    except Exception as e:
-        print(f"Error reading file {file_path}: {e}")
-        sys.exit(1)
-
+    # Convert to Python objects
+    print(table[:10])
+    rows = table.column('timestamp').to_pylist()
+    rows = np.array(sorted(rows))
+    gaps = np.diff(rows)/1000
+    idxs = np.where(gaps > 1)[0]
+    print(len(idxs))
+    print(idxs/len(gaps))
+    print(gaps[idxs])
+    print(np.diff(rows[idxs])/1000)
+    print(sum(gaps[idxs])/60)
+    print((rows[-1]-rows[0])/60/1000)
 
 def main():
     import argparse

@@ -22,7 +22,7 @@ DEFAULTS = {
 }
 
 def price_to_int(price_str: str) -> int:
-    """Convert price string to uint32 integer (multiply by 10000)."""
+    """Convert price string to int32 integer (multiply by 10000)."""
     try:
         return int(float(price_str) * 10000)
     except (ValueError, TypeError):
@@ -30,7 +30,7 @@ def price_to_int(price_str: str) -> int:
 
 
 def size_to_int(size_str: str) -> int:
-    """Convert size string to uint64 integer (multiply by 10000)."""
+    """Convert size string to int64 integer (multiply by 10000)."""
     try:
         return int(float(size_str) * 10000)
     except (ValueError, TypeError):
@@ -61,7 +61,7 @@ class EventTypeParquetWriter:
     - Batched writes for performance
     - Thread-safe operation
     - Memory-efficient buffering with size limits
-    - Optimized numeric encoding: prices as uint32, sizes as uint64
+    - Optimized numeric encoding: prices as int32, sizes as int64
     """
     
     def __init__(
@@ -104,8 +104,8 @@ class EventTypeParquetWriter:
         """Initialize optimized PyArrow schemas for each event type.
         
         Numeric encoding for optimal performance:
-        - Prices: multiply by 10,000, store as uint32 (range [0,1] -> [0,10000])
-        - Sizes: multiply by 10,000, store as uint64 (large orders possible)
+        - Prices: multiply by 10,000, store as int32 (range [0,1] -> [0,10000])
+        - Sizes: multiply by 10,000, store as int64 (large orders possible)
         - Timestamps: convert to int64
         """
         
@@ -122,15 +122,15 @@ class EventTypeParquetWriter:
         
         # Order summary schema for bids/asks
         order_summary_schema = pa.struct([
-            pa.field("price", pa.uint32()),  # stored as price * 10000
-            pa.field("size", pa.uint64())    # stored as size * 10000
+            pa.field("price", pa.int32()),  # stored as price * 10000
+            pa.field("size", pa.int64())    # stored as size * 10000
         ])
         
         # Price change schema
         price_change_schema = pa.struct([
-            pa.field("price", pa.uint32()),  # stored as price * 10000
+            pa.field("price", pa.int32()),  # stored as price * 10000
             pa.field("side", pa.string()),
-            pa.field("size", pa.uint64())    # stored as size * 10000
+            pa.field("size", pa.int64())    # stored as size * 10000
         ])
         
         self.schemas = {
@@ -146,15 +146,15 @@ class EventTypeParquetWriter:
             ]),
             
             "tick_size_change": pa.schema(base_fields + [
-                pa.field("old_tick_size", pa.uint32()),  # stored as tick_size * 10000
-                pa.field("new_tick_size", pa.uint32())   # stored as tick_size * 10000
+                pa.field("old_tick_size", pa.int32()),  # stored as tick_size * 10000
+                pa.field("new_tick_size", pa.int32())   # stored as tick_size * 10000
             ]),
             
             "last_trade_price": pa.schema(base_fields + [
-                pa.field("price", pa.uint32()),      # stored as price * 10000
-                pa.field("size", pa.uint64()),       # stored as size * 10000
+                pa.field("price", pa.int32()),      # stored as price * 10000
+                pa.field("size", pa.int64()),       # stored as size * 10000
                 pa.field("side", pa.string()),
-                pa.field("fee_rate_bps", pa.uint32())  # stored as bps * 100 (0.01 bps resolution)
+                pa.field("fee_rate_bps", pa.int32())  # stored as bps * 100 (0.01 bps resolution)
             ])
         }
     
@@ -308,7 +308,7 @@ class EventTypeParquetWriter:
         for field in schema:
             if field.name not in normalized:
                 # Set appropriate default based on field type
-                if field.type in [pa.uint32(), pa.uint64(), pa.int64()]:
+                if field.type in [pa.int32(), pa.int64()]:
                     normalized[field.name] = 0
                 elif field.type == pa.string():
                     normalized[field.name] = ""

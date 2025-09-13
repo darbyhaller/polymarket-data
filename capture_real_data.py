@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-import json, time, random, os, signal, threading, sys
-import requests
+import json, time, random, os, signal, threading
 import websocket  # pip install websocket-client
 from threading import Lock, Event
-from datetime import datetime
-from collections import deque
 from fetch_markets import get_tradeable_asset_mappings
 from parquet_writer import write_event, init_writer, close_writer
 
@@ -23,54 +20,6 @@ STALL_TIMEOUT = 90
 BACKOFF_MIN = 1.0
 BACKOFF_MAX = 20.0
 
-from collections import Counter
-metrics = Counter()
-_last_metrics_log = 0.0
-
-def log_metrics(every=30):
-    global _last_metrics_log
-    now = time.time()
-    if now - _last_metrics_log >= every:
-        _last_metrics_log = now
-        print("[metrics]",
-              dict(sorted(metrics.items())),
-              "allowed_asset_ids:", len(allowed_asset_ids),
-              "seen_hashes:", seen_hashes.size())
-
-class BoundedHashCache:
-    """LRU cache for hash deduplication with bounded memory usage."""
-    
-    def __init__(self, max_size=1_000_000):
-        self.max_size = max_size
-        self.cache_set = set()
-        self.cache_queue = deque()
-        self.lock = Lock()
-    
-    def contains(self, hash_value):
-        """Check if hash exists in cache."""
-        with self.lock:
-            return hash_value in self.cache_set
-    
-    def add(self, hash_value):
-        """Add hash to cache, evicting oldest if at capacity."""
-        with self.lock:
-            if hash_value in self.cache_set:
-                return  # Already exists
-            
-            # Add new hash
-            self.cache_set.add(hash_value)
-            self.cache_queue.append(hash_value)
-            
-            # Evict oldest if over capacity
-            while len(self.cache_queue) > self.max_size:
-                oldest = self.cache_queue.popleft()
-                self.cache_set.discard(oldest)
-    
-    def size(self):
-        """Get current cache size."""
-        with self.lock:
-            return len(self.cache_set)
-
 # state
 data_lock = Lock()
 file_lock = Lock()
@@ -81,7 +30,6 @@ previous_allowed_asset_ids = set()
 asset_to_market = {}
 asset_outcome = {}
 market_to_first_asset = {}
-seen_hashes = BoundedHashCache(max_size=1000000)  # Bounded LRU cache instead of unbounded set
 
 subscribed_asset_ids = set()
 subs_version = 0
@@ -90,21 +38,6 @@ should_stop = Event()
 last_message_time = 0.0
 is_first_subscription = True
 backoff = BACKOFF_MIN  # Global backoff state
-
-# File handling now managed by parquet writer
-def fs_open():
-    """Initialize parquet writer."""
-    init_writer(root=OUTDIR)
-    print(f"Initialized parquet writer at {OUTDIR}")
-
-def fs_health_check():
-    """Parquet writer handles its own health checks."""
-    return True
-
-def fs_close():
-    """Close parquet writer and flush all buffers."""
-    close_writer()
-    print("Closed parquet writer")
 
 def update_asset_mappings_from_api(force_update=False):
     global subs_version, previous_allowed_asset_ids
@@ -265,39 +198,28 @@ def on_message(ws, msg):
 
         events = payload if isinstance(payload, list) else [payload]
         for d in events:
-            metrics['recv'] += 1
             et = d.get("event_type", "unknown")
             aid = d.get("asset_id")
             with data_lock:
                 if aid not in allowed_asset_ids:
                     continue
-                h = d.get("hash")
-                if h:
-                    if seen_hashes.contains(h):
-                        continue
-                    seen_hashes.add(h)
-                title = asset_to_market.get(aid, "")
                 outcome = asset_outcome.get(aid, "")
             base = {
                 "recv_ts_ms": recv_ms,
-                "event_type": et,
                 "asset_id": aid,
                 "market": d.get("market"),
-                "market_title": title,
                 "outcome": outcome,
             }
             if et == "book":
                 base.update({
                     "bids": d.get("bids") or d.get("buys") or [],
                     "asks": d.get("asks") or d.get("sells") or [],
-                    "hash": d.get("hash"),
                     "timestamp": d.get("timestamp"),
                 })
             elif et == "price_change":
                 base.update({
                     "changes": d.get("changes", []),
                     "timestamp": d.get("timestamp"),
-                    "hash": d.get("hash"),
                 })
             elif et == "tick_size_change":
                 base.update({
@@ -316,9 +238,7 @@ def on_message(ws, msg):
             for k, v in d.items():
                 if k not in base:
                     base[k] = v
-            metrics['kept'] += 1
             write_event(base)
-        log_metrics()
     except Exception as e:
         print(f"on_message error: {e}")
 
@@ -412,7 +332,7 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    fs_open()
+    init_writer(root=OUTDIR)
     fetch_markets_and_populate_data(initial=True)
     threading.Thread(target=markets_poll_loop, daemon=True).start()
     threading.Thread(target=file_health_monitor, daemon=True).start()
@@ -479,7 +399,7 @@ def main():
             pass
 
     print("WebSocket loop exited")
-    fs_close()
+    close_writer()
 
 if __name__ == "__main__":
     main()
