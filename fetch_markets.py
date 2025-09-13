@@ -36,7 +36,6 @@ def load_cache():
                         if condition_id:
                             markets_data[condition_id] = data
                             
-            print(f"Loaded {len(markets_data)} cached markets, last cursor: {last_cursor[:20]}...")
         except Exception as e:
             # Try loading as old format for backward compatibility
             try:
@@ -95,7 +94,6 @@ def fetch_markets_from_cursor(start_cursor=""):
                 return cursor  # no more data; return last valid cursor
                 
             markets_fetched += len(data)
-            print(f"Fetched page with {len(data)} markets (total: {markets_fetched})")
             
             next_cursor = page.get("next_cursor") or "LTE="
             # Yield the whole page with the next_cursor
@@ -118,7 +116,7 @@ def update_markets_cache(full_refresh=False):
         markets_data = {}
         start_cursor = ""
     else:
-        print(f"Performing incremental update from cursor: {last_cursor[:20]}...")
+        print(f"Performing incremental update from cursor: {last_cursor[:20]}")
         start_cursor = last_cursor
     
     new_markets = 0

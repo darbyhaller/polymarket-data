@@ -67,15 +67,9 @@ def update_asset_mappings_from_api():
             assets_changed = allowed_asset_ids != previous_set
             previous_allowed_asset_ids = allowed_asset_ids.copy()
 
-            print(f"Updated mappings: {mappings['total_markets']} total markets, "
-                  f"{mappings['tradeable_markets']} tradeable, "
-                  f"{len(allowed_asset_ids)} subscribed assets")
-            
         if assets_changed:
             with ws_lock:
                 subs_version += 1
-        else:
-            print("No asset changes detected - skipping resubscription")
     except Exception as e:
         print(f"Error updating asset mappings: {e}")
     return max(0, new_assets)
@@ -121,7 +115,6 @@ def on_open(ws):
     send_subscription(ws)
     with ws_lock:
         sent_version = subs_version
-    print("Subscription sent")
 
     # Start a subs refresher thread tied to this ws instance
     threading.Thread(target=subs_refresher, args=(ws,), daemon=True).start()
@@ -283,8 +276,6 @@ def main():
     update_asset_mappings_from_api()
     threading.Thread(target=markets_poll_loop, daemon=True).start()
     threading.Thread(target=file_health_monitor, daemon=True).start()
-
-    print("Starting WebSocket with persistent reconnect loop (no rel)...")
 
     global backoff
     ws = None
