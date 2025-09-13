@@ -24,6 +24,8 @@ import sys
 from glob import glob
 
 import pyarrow.parquet as pq
+import pyarrow as pa
+from tqdm import tqdm
 
 # ---------- Config ----------
 PRICE_SCALE = 10000.0     # uint32 -> float
@@ -34,6 +36,58 @@ def u32_to_price(u):
 
 def normalize_int(x):
     return int(x)
+
+def get_schema_for_event_type(event_type: str) -> pa.Schema:
+    """Get the appropriate schema for the given event type."""
+    # Common base fields
+    base_fields = [
+        pa.field("recv_ts_ms", pa.int64()),
+        pa.field("event_type", pa.string()),
+        pa.field("asset_id", pa.string()),
+        pa.field("market", pa.string()),
+        pa.field("market_title", pa.string()),
+        pa.field("outcome", pa.string()),
+        pa.field("timestamp", pa.int64()),
+    ]
+    
+    # Order summary schema for bids/asks
+    order_summary_schema = pa.struct([
+        pa.field("price", pa.uint32()),
+        pa.field("size", pa.uint64())
+    ])
+    
+    # Price change schema
+    price_change_schema = pa.struct([
+        pa.field("price", pa.uint32()),
+        pa.field("side", pa.string()),
+        pa.field("size", pa.uint64())
+    ])
+    
+    if event_type == "last_trade_price":
+        return pa.schema(base_fields + [
+            pa.field("price", pa.uint32()),
+            pa.field("size", pa.uint64()),
+            pa.field("side", pa.string()),
+            pa.field("fee_rate_bps", pa.uint32())
+        ])
+    elif event_type == "price_change":
+        return pa.schema(base_fields + [
+            pa.field("hash", pa.string()),
+            pa.field("changes", pa.list_(price_change_schema))
+        ])
+    elif event_type == "book":
+        return pa.schema(base_fields + [
+            pa.field("hash", pa.string()),
+            pa.field("bids", pa.list_(order_summary_schema)),
+            pa.field("asks", pa.list_(order_summary_schema))
+        ])
+    elif event_type == "tick_size_change":
+        return pa.schema(base_fields + [
+            pa.field("old_tick_size", pa.uint32()),
+            pa.field("new_tick_size", pa.uint32())
+        ])
+    else:
+        raise ValueError(f"Unknown event type: {event_type}")
 
 def list_parquet_files(root, event_type):
     base = os.path.join(root, f"event_type={event_type}")
@@ -50,8 +104,11 @@ def read_latest_book_per_asset(root, verbose=False):
     cols = ["timestamp", "asset_id", "market_title", "outcome", "bids", "asks"]
     latest = {}  # asset_id -> (timestamp, rowdict)
 
+    # Get the schema for book events
+    book_schema = get_schema_for_event_type("book")
+    
     for fp in files:
-        table = pq.read_table(fp, columns=cols)
+        table = pq.read_table(fp, columns=cols, schema=book_schema)
         if table.num_rows == 0:
             continue
         ts, aid, mt, oc, bids, asks = [table[c] for c in cols]
@@ -91,15 +148,15 @@ def read_latest_book_per_asset(root, verbose=False):
     return books
 
 def load_all_price_changes(root, verbose=False):
-    print('hi')
     files = list_parquet_files(root, "price_change")
     print(f"[load] price_change files: {len(files)}", file=sys.stderr)
     rows = []
     cols = ["timestamp", "asset_id", "market_title", "outcome", "changes"]
-    total_rows = 0
-    for fp in files:
-        table = pq.read_table(fp, columns=cols)
-        total_rows += table.num_rows
+    # Get the schema for price_change events
+    price_change_schema = get_schema_for_event_type("price_change")
+    
+    for fp in tqdm(files):
+        table = pq.read_table(fp, columns=cols, schema=price_change_schema)
         if table.num_rows == 0:
             continue
         ts, aid, mt, oc, ch = [table[c] for c in cols]
@@ -115,8 +172,6 @@ def load_all_price_changes(root, verbose=False):
                 "changes": ch[i].as_py() or []
             })
     rows.sort(key=lambda r: r["timestamp"])
-    if verbose:
-        print(f"[load] price_change rows loaded: {len(rows)} (raw: {total_rows})", file=sys.stderr)
     return rows
 
 def compute_l1_updates(root, out_path, pretty=False, verbose=False):
@@ -137,7 +192,7 @@ def compute_l1_updates(root, out_path, pretty=False, verbose=False):
             out_fh.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
         emitted += 1
     
-    for row in pc_rows:
+    for row in tqdm(pc_rows):
         ts = row["timestamp"]
         if last_pc_ts is not None and ts - last_pc_ts > OUTAGE_MS:
             emit({"event_type": "outage", "timestamp": last_pc_ts + OUTAGE_MS})
