@@ -36,7 +36,6 @@ subs_version = 0
 sent_version = -1
 should_stop = Event()
 last_message_time = 0.0
-is_first_subscription = True
 backoff = BACKOFF_MIN  # Global backoff state
 
 def update_asset_mappings_from_api(force_update=False):
@@ -126,33 +125,19 @@ def file_health_monitor():
             print(f"Parquet writer flush failed: {e}")
 
 def send_subscription(ws):
-    global subscribed_asset_ids, is_first_subscription
+    global subscribed_asset_ids
     with data_lock:
         current_ids = set(allowed_asset_ids)
         new_ids = current_ids - subscribed_asset_ids
-        removed_ids = subscribed_asset_ids - current_ids
 
-        if is_first_subscription or len(new_ids) + len(removed_ids) > max(1, int(len(current_ids) * 0.5)):
-            sub = {"assets_ids": list(current_ids), "type": "market", "initial_dump": True}
+        if new_ids:
+            sub = {"assets_ids": list(new_ids), "type": "market", "initial_dump": True}
             ws.send(json.dumps(sub))
-            subscribed_asset_ids = current_ids.copy()
-            print(f"Full subscription to {len(current_ids)} asset IDs (initial_dump=True)")
-            is_first_subscription = False
-        else:
-            if new_ids:
-                sub = {"assets_ids": list(new_ids), "type": "market", "initial_dump": False}
-                ws.send(json.dumps(sub))
-                print(f"Subscribed to {len(new_ids)} new asset IDs (initial_dump=False)")
-            if removed_ids:
-                unsub = {"assets_ids": list(removed_ids), "type": "market", "unsubscribe": True}
-                ws.send(json.dumps(unsub))
-                print(f"Unsubscribed from {len(removed_ids)} asset IDs")
-            subscribed_asset_ids = current_ids.copy()
-            if not new_ids and not removed_ids:
-                print(f"No subscription changes needed ({len(current_ids)} assets)")
+        print(f"Subscribed to {len(new_ids)} new asset IDs. Total: {len(current_ids)}")
+        subscribed_asset_ids = current_ids
 
 def on_open(ws):
-    global sent_version, last_message_time, is_first_subscription, backoff
+    global sent_version, last_message_time, backoff
     last_message_time = time.time()
     backoff = BACKOFF_MIN  # Reset backoff on successful connection
     print("WebSocket connected - reset backoff to minimum")
@@ -164,7 +149,6 @@ def on_open(ws):
         print("No allowed asset IDs; closing")
         ws.close()
         return
-    is_first_subscription = True
     send_subscription(ws)
     with ws_lock:
         sent_version = subs_version
@@ -248,8 +232,7 @@ def on_error(ws, err):
 
 def on_close(ws, code, msg):
     print(f"WebSocket closed: {code} {msg}")
-    global is_first_subscription, subscribed_asset_ids
-    is_first_subscription = True
+    global subscribed_asset_ids
     subscribed_asset_ids.clear()
     print("Reset subscription state for reconnect")
 
@@ -297,7 +280,7 @@ def watchdog(ws):
 def handle_signal(signum, frame):
     print(f"Signal {signum}: stopping")
     should_stop.set()
-    fs_close()
+    close_writer()
     # Force exit if signal handler is called multiple times
     if hasattr(handle_signal, '_called'):
         print("Force exit")
