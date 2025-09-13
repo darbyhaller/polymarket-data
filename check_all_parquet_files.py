@@ -38,7 +38,7 @@ def find_all_parquet_files(root: str) -> List[str]:
     return sorted(files)
 
 def main():
-    root_dir = "hour=19"
+    root_dir = "parquets"
     
     if not os.path.exists(root_dir):
         print(f"Directory {root_dir} not found!")
