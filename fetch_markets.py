@@ -122,18 +122,13 @@ def update_markets_cache(full_refresh=False):
         start_cursor = last_cursor
     
     new_markets = 0
-    updated_markets = 0
     final_cursor = start_cursor
     
     for data, next_cursor in fetch_markets_from_cursor(start_cursor):
         for market in data:
             condition_id = market.get("condition_id")
-            if not condition_id:
-                continue
                 
-            if condition_id in markets_data:
-                updated_markets += 1
-            else:
+            if condition_id not in markets_data:
                 new_markets += 1
                 
             markets_data[condition_id] = market
@@ -141,8 +136,9 @@ def update_markets_cache(full_refresh=False):
         if next_cursor != "LTE=":
             final_cursor = next_cursor
     
-    print(f"Update complete: {new_markets} new, {updated_markets} updated")
-    save_cache(markets_data, final_cursor)
+    if new_markets > 0:
+        print(f"Update complete: {new_markets} new")
+        save_cache(markets_data, final_cursor)
     return markets_data
 
 def get_tradeable_markets():

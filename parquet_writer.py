@@ -4,6 +4,7 @@ High-performance parquet writer for Polymarket event data.
 Partitioned by event_type with optimized schemas for each event type.
 """
 
+from datetime import timedelta
 import os
 import threading
 from datetime import datetime, timezone
@@ -23,33 +24,9 @@ DEFAULTS = {
 
 def price_to_int(price_str: str) -> int:
     """Convert price string to int32 integer (multiply by 10000)."""
-    try:
-        return int(float(price_str) * 10000)
-    except (ValueError, TypeError):
-        return 0
+    return int(float(price_str) * 10_000)
 
-
-def size_to_int(size_str: str) -> int:
-    """Convert size string to int64 integer (multiply by 10000)."""
-    try:
-        return int(float(size_str) * 10000)
-    except (ValueError, TypeError):
-        return 0
-
-
-def timestamp_to_int(ts) -> int:
-    """Convert timestamp to int64 milliseconds, handling seconds vs milliseconds."""
-    try:
-        x = int(ts)
-    except (ValueError, TypeError):
-        return 0
-    # Heuristic: seconds vs milliseconds
-    if x < 10**12:   # looks like seconds
-        return x * 1000
-    if x < 10**14:   # looks like milliseconds
-        return x
-    return x // 1000  # probably microseconds
-
+size_to_int = price_to_int
 
 class EventTypeParquetWriter:
     """
@@ -112,10 +89,8 @@ class EventTypeParquetWriter:
         # Common base schema
         base_fields = [
             pa.field("recv_ts_ms", pa.int64()),
-            pa.field("event_type", pa.string()),
             pa.field("asset_id", pa.string()),
             pa.field("market", pa.string()),
-            pa.field("market_title", pa.string()),
             pa.field("outcome", pa.string()),
             pa.field("timestamp", pa.int64()),  # Convert timestamp strings to int64
         ]
@@ -135,13 +110,11 @@ class EventTypeParquetWriter:
         
         self.schemas = {
             "book": pa.schema(base_fields + [
-                pa.field("hash", pa.string()),
                 pa.field("bids", pa.list_(order_summary_schema)),
                 pa.field("asks", pa.list_(order_summary_schema))
             ]),
             
             "price_change": pa.schema(base_fields + [
-                pa.field("hash", pa.string()),
                 pa.field("changes", pa.list_(price_change_schema))
             ]),
             
@@ -170,7 +143,6 @@ class EventTypeParquetWriter:
             compression=self.compression,
             use_dictionary=True,
             write_statistics=True,
-            version="2.6",
         )
         self.rows_written[file_key] = 0
         # Store final path separately for atomic rename on close
@@ -200,7 +172,6 @@ class EventTypeParquetWriter:
         This prevents late events from causing file collisions by keeping writers
         open for a grace period after their hour boundary.
         """
-        from datetime import timedelta
         
         now = datetime.fromtimestamp(time.time(), timezone.utc)
         # Close writers for hours that ended more than grace_minutes ago
@@ -253,8 +224,7 @@ class EventTypeParquetWriter:
             return normalized
         
         # Convert timestamps to integers
-        if "timestamp" in normalized:
-            normalized["timestamp"] = timestamp_to_int(normalized["timestamp"])
+        normalized["timestamp"] = int(normalized["timestamp"])
         
         # Handle legacy field names (bids/asks vs buys/sells)
         if event_type == "book":
@@ -463,6 +433,4 @@ def init_writer(**overrides):
 def close_writer():
     """Close the global writer."""
     global writer
-    if writer is not None:
-        writer.close()
-        writer = None
+    writer.close()
