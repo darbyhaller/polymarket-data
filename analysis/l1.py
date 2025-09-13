@@ -5,8 +5,7 @@ Build L1 (top-of-book) data and detect trade outages from Polymarket parquet out
 Changes vs v1:
 - Sort all processing by **timestamp** (exchange ts), not recv_ts_ms.
 - L1 prices are **initialized from book events** (top-of-book).
-- Detect **global outages**: periods where **no trades occur for any asset** for longer than a
-  configurable threshold (default 1.0s).
+- Detect **global outages**: periods where **no price_change events occur** within 1-second windows.
 - Progress bars (tqdm) for scanning, deriving, writing, and outage detection. Suitable for ~2.5GB+.
 
 Reads a parquet lake written by EventTypeParquetWriter with Hive partitions:
@@ -21,7 +20,7 @@ All monetary/size fields remain fixed-point integers:
 - sizes:  uint64 (size  * 10_000)
 
 Usage:
-  python l1.py \
+  python analysis/l1.py \
       --input-root /var/data/polymarket/parquets \
       --output-root /var/data/polymarket/l1 \
       [--start "2025-09-05T00:00:00Z" --end "2025-09-07T00:00:00Z"] \
@@ -206,7 +205,7 @@ def write_single_parquet_sorted(batches: List[pa.RecordBatch], out_file: str,
 
 def detect_outages(input_root: str, start_ms: Optional[int], end_ms: Optional[int],
                    threshold_ms: int) -> List[Tuple[int, int, int]]:
-    """Detect periods with **no last_trade_price events across ALL assets** for > threshold.
+    """Detect periods with **no price_change events** within 1-second windows.
 
     Returns list of (start_ms, end_ms, duration_ms), sorted by start.
     """
@@ -222,7 +221,7 @@ def detect_outages(input_root: str, start_ms: Optional[int], end_ms: Optional[in
     if not valid_files:
         return []
     dataset = ds.dataset(valid_files, format="parquet", partitioning="hive")
-    filt = (ds.field("event_type") == "last_trade_price")
+    filt = (ds.field("event_type") == "price_change")
     if start_ms is not None:
         filt = filt & (ds.field("timestamp") >= start_ms)
     if end_ms is not None:
@@ -241,9 +240,9 @@ def detect_outages(input_root: str, start_ms: Optional[int], end_ms: Optional[in
         batch_size=DEFAULTS["batch_size"],
     )
 
-    # Gather all trade timestamps (int64 ms) then sort once.
+    # Gather all price_change timestamps (int64 ms) then sort once.
     stamps: List[int] = []
-    pbar = tqdm(desc="Scanning trades", unit="rows", total=total_rows)
+    pbar = tqdm(desc="Scanning price_change events", unit="rows", total=total_rows)
     for b in scanner.to_batches():
         col = b.column(0).cast(pa.int64())
         # extend list efficiently
@@ -259,15 +258,66 @@ def detect_outages(input_root: str, start_ms: Optional[int], end_ms: Optional[in
         return []
 
     stamps.sort()
-
+    print(f"Found {len(stamps)} price_change events")
+    
+    # Define 1-second window size (1000ms)
+    window_ms = 1000
+    
+    # Start from the first price_change event, aligned to second boundaries
+    first_ts = stamps[0]
+    last_ts = stamps[-1]
+    
+    # Align start to second boundary
+    start_window = (first_ts // window_ms) * window_ms
+    end_window = ((last_ts // window_ms) + 1) * window_ms
+    
+    print(f"Checking 1-second windows from {start_window} to {end_window}")
+    
     outages: List[Tuple[int, int, int]] = []
-    thr = threshold_ms
-    prev = stamps[0]
-    for t in tqdm(stamps[1:], desc="Detecting outages", unit="gap"):
-        if t - prev > thr:
-            outages.append((prev, t, t - prev))
-        prev = t
-
+    current_outage_start = None
+    
+    # Efficiently iterate through windows using sorted timestamps
+    window_start = start_window
+    stamp_idx = 0
+    total_windows = (end_window - start_window) // window_ms
+    
+    with tqdm(total=total_windows, desc="Checking 1s windows", unit="window") as pbar:
+        while window_start < end_window:
+            window_end = window_start + window_ms
+            
+            # Find if any timestamps fall in this window [window_start, window_end)
+            has_events = False
+            
+            # Skip timestamps before this window
+            while stamp_idx < len(stamps) and stamps[stamp_idx] < window_start:
+                stamp_idx += 1
+            
+            # Check if any timestamp falls in current window
+            if stamp_idx < len(stamps) and stamps[stamp_idx] < window_end:
+                has_events = True
+            
+            if not has_events:
+                # This is an outage window
+                if current_outage_start is None:
+                    current_outage_start = window_start
+            else:
+                # This window has events, close any ongoing outage
+                if current_outage_start is not None:
+                    outage_duration = window_start - current_outage_start
+                    if outage_duration >= threshold_ms:
+                        outages.append((current_outage_start, window_start, outage_duration))
+                    current_outage_start = None
+            
+            window_start = window_end
+            pbar.update(1)
+    
+    # Handle final outage if still ongoing
+    if current_outage_start is not None:
+        outage_duration = end_window - current_outage_start
+        if outage_duration >= threshold_ms:
+            outages.append((current_outage_start, end_window, outage_duration))
+    
+    print(f"Detected {len(outages)} outage periods >= {threshold_ms}ms")
     return outages
 
 
@@ -281,13 +331,13 @@ def main():
     ap.add_argument("--row-group-size", type=int, default=DEFAULTS["row_group_size"], help="Output row group size")
     ap.add_argument("--compression", default=DEFAULTS["compression"], help="Output parquet compression (zstd, snappy, gzip)")
     ap.add_argument("--outages-csv", help="Optional path to write CSV of detected outages")
-    ap.add_argument("--outage-threshold-seconds", type=float, default=1.0, help="Global outage gap in seconds (> this triggers an outage)")
+    ap.add_argument("--outage-threshold-seconds", type=float, default=1.0, help="Minimum outage duration in seconds to report (windows without price_change events)")
     args = ap.parse_args()
 
     start_ms = parse_iso8601(args.start)
     end_ms = parse_iso8601(args.end)
 
-    # ==== L1 BUILD (from book events), sorted by exchange timestamp ====
+    # ==== L1 BUILD (from book AND price_change events), sorted by exchange timestamp ====
     # Filter out .inprogress files
     temp_dataset = ds.dataset(
         args.input_root,
@@ -301,7 +351,9 @@ def main():
         print("No valid parquet files found (all are .inprogress)")
         return
     dataset = ds.dataset(valid_files, format="parquet", partitioning="hive")
-    filt = (ds.field("event_type") == "book")
+    
+    # Filter for BOTH book and price_change events
+    filt = (ds.field("event_type") == "book") | (ds.field("event_type") == "price_change")
     if start_ms is not None:
         filt = filt & (ds.field("timestamp") >= start_ms)
     if end_ms is not None:
@@ -314,11 +366,12 @@ def main():
         "market_title",
         "outcome",
         "timestamp",
+        "event_type",
         "bids",
         "asks",
     ]
 
-    # Process book events to build L1
+    # Process both book and price_change events to build L1
     try:
         total_rows = dataset.count_rows(filter=filt)
     except Exception:
@@ -331,22 +384,111 @@ def main():
         batch_size=args.batch_size,
     )
 
-    batches = []
-    pbar = tqdm(desc="Processing book events", unit="rows", total=total_rows)
+    print("Processing both book and price_change events...")
+    # We need to process events chronologically to maintain proper L1 state
+    # This is more complex - we need to collect all events, sort globally, then process
+    all_events = []
+    
+    pbar = tqdm(desc="Collecting events", unit="rows", total=total_rows)
     for batch in scanner.to_batches():
-        l1_batch = derive_l1_batch_sorted_by_ts(batch)
-        batches.append(l1_batch)
+        for i in range(batch.num_rows):
+            event = {
+                'recv_ts_ms': batch.column(0)[i].as_py(),
+                'asset_id': batch.column(1)[i].as_py(),
+                'market': batch.column(2)[i].as_py(),
+                'market_title': batch.column(3)[i].as_py(),
+                'outcome': batch.column(4)[i].as_py(),
+                'timestamp': batch.column(5)[i].as_py(),
+                'event_type': batch.column(6)[i].as_py(),
+                'bids': batch.column(7)[i].as_py() if batch.column(7)[i].is_valid else None,
+                'asks': batch.column(8)[i].as_py() if batch.column(8)[i].is_valid else None,
+            }
+            all_events.append(event)
         pbar.update(batch.num_rows)
     pbar.close()
 
-    if batches:
-        print(f"Writing L1 data to {args.output_file}")
-        write_single_parquet_sorted(batches, args.output_file, args.compression, args.row_group_size)
-        print(f"L1 data written to {args.output_file}")
-    else:
-        print("No book events found for the specified time range")
+    if not all_events:
+        print("No events found for the specified time range")
+        return
 
-    # ==== OUTAGE DETECTION (from last_trade_price events) ====
+    # Sort all events by timestamp
+    print("Sorting events by timestamp...")
+    all_events.sort(key=lambda x: x['timestamp'])
+    
+    # Build L1 records by maintaining state per asset
+    print("Building L1 records...")
+    l1_records = []
+    asset_states = {}  # asset_id -> current L1 state
+    
+    for event in tqdm(all_events, desc="Processing events"):
+        asset_id = event['asset_id']
+        
+        if event['event_type'] == 'book':
+            # Book event - update full book state
+            bids = event['bids']
+            asks = event['asks']
+            
+            bid_px = bid_sz = ask_px = ask_sz = None
+            if bids and len(bids) > 0:
+                bid_px = int(bids[0]['price'])
+                bid_sz = int(bids[0]['size'])
+            if asks and len(asks) > 0:
+                ask_px = int(asks[0]['price'])
+                ask_sz = int(asks[0]['size'])
+                
+        elif event['event_type'] == 'price_change':
+            # Price change event - process bids/asks like book events
+            # (price_change events seem to have the same structure as book events)
+            bids = event['bids']
+            asks = event['asks']
+            
+            bid_px = bid_sz = ask_px = ask_sz = None
+            if bids and len(bids) > 0:
+                bid_px = int(bids[0]['price'])
+                bid_sz = int(bids[0]['size'])
+            if asks and len(asks) > 0:
+                ask_px = int(asks[0]['price'])
+                ask_sz = int(asks[0]['size'])
+        else:
+            continue
+            
+        # Calculate mid and spread
+        mid_px = spread_px = None
+        if bid_px is not None and ask_px is not None:
+            mid_px = (bid_px + ask_px) // 2
+            spread_px = ask_px - bid_px
+            
+        # Update asset state
+        asset_states[asset_id] = (bid_px, bid_sz, ask_px, ask_sz)
+        
+        # Create L1 record
+        l1_record = {
+            'recv_ts_ms': event['recv_ts_ms'],
+            'asset_id': asset_id,
+            'market': event['market'],
+            'market_title': event['market_title'],
+            'outcome': event['outcome'],
+            'ts_ms': event['timestamp'],
+            'bid_px': bid_px,
+            'bid_sz': bid_sz,
+            'ask_px': ask_px,
+            'ask_sz': ask_sz,
+            'mid_px': mid_px,
+            'spread_px': spread_px,
+        }
+        l1_records.append(l1_record)
+    
+    print(f"Generated {len(l1_records)} L1 records")
+    
+    # Convert to PyArrow table and write
+    if l1_records:
+        l1_table = pa.Table.from_pylist(l1_records, schema=l1_schema())
+        print(f"Writing L1 data to {args.output_file}")
+        ensure_dir(os.path.dirname(args.output_file) or ".")
+        pq.write_table(l1_table, args.output_file, compression=args.compression)
+        print(f"L1 data written to {args.output_file}")
+
+    # ==== OUTAGE DETECTION (from price_change events) ====
     threshold_ms = int(args.outage_threshold_seconds * 1000)
     outages = detect_outages(args.input_root, start_ms, end_ms, threshold_ms)
 

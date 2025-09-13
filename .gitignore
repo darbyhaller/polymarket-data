@@ -3,6 +3,7 @@ temp
 *.json
 parquets
 output.parquet
+analysis/plots
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
