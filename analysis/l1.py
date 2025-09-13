@@ -75,6 +75,9 @@ def l1_schema() -> pa.Schema:
         pa.field("ask_sz", pa.uint64()),
         pa.field("mid_px", pa.uint32()),
         pa.field("spread_px", pa.uint32()),
+        # Outage fields
+        pa.field("is_outage", pa.bool_()),
+        pa.field("outage_duration_ms", pa.int64()),
     ])
 
 
@@ -337,6 +340,38 @@ def main():
     start_ms = parse_iso8601(args.start)
     end_ms = parse_iso8601(args.end)
 
+    # ==== OUTAGE DETECTION FIRST (from price_change events) ====
+    print("=== DETECTING OUTAGES FIRST ===")
+    threshold_ms = int(args.outage_threshold_seconds * 1000)
+    outages = detect_outages(args.input_root, start_ms, end_ms, threshold_ms)
+
+    if outages:
+        print(f"Detected {len(outages)} outage(s) > {threshold_ms} ms")
+        if args.outages_csv:
+            ensure_dir(os.path.dirname(args.outages_csv))
+            import csv
+            with open(args.outages_csv, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["start_ms","end_ms","duration_ms"])  # inclusive/exclusive boundary
+                for s,e,d in tqdm(outages, desc="Writing outages CSV", unit="outage"):
+                    w.writerow([s,e,d])
+            print(f"Outages written to {args.outages_csv}")
+        
+        # Also write outages to a default file immediately
+        outages_file = args.output_file.replace('.parquet', '_outages.csv')
+        outages_dir = os.path.dirname(outages_file)
+        if outages_dir:  # Only create directory if there is one
+            ensure_dir(outages_dir)
+        import csv
+        with open(outages_file, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["start_ms","end_ms","duration_ms"])
+            for s,e,d in outages:
+                w.writerow([s,e,d])
+        print(f"Outages also written to {outages_file}")
+    else:
+        print("No outages detected for given window/threshold.")
+
     # ==== L1 BUILD (from book AND price_change events), sorted by exchange timestamp ====
     # Filter out .inprogress files
     temp_dataset = ds.dataset(
@@ -488,23 +523,6 @@ def main():
         pq.write_table(l1_table, args.output_file, compression=args.compression)
         print(f"L1 data written to {args.output_file}")
 
-    # ==== OUTAGE DETECTION (from price_change events) ====
-    threshold_ms = int(args.outage_threshold_seconds * 1000)
-    outages = detect_outages(args.input_root, start_ms, end_ms, threshold_ms)
-
-    if outages:
-        print(f"Detected {len(outages)} outage(s) > {threshold_ms} ms")
-        if args.outages_csv:
-            ensure_dir(os.path.dirname(args.outages_csv))
-            import csv
-            with open(args.outages_csv, "w", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["start_ms","end_ms","duration_ms"])  # inclusive/exclusive boundary
-                for s,e,d in tqdm(outages, desc="Writing outages CSV", unit="outage"):
-                    w.writerow([s,e,d])
-            print(f"Outages written to {args.outages_csv}")
-    else:
-        print("No outages detected for given window/threshold.")
 
 
 if __name__ == "__main__":
