@@ -53,7 +53,7 @@ def fetch_markets_from_cursor(start_cursor=""):
     markets_fetched = 0
     
     while True:
-        url = f"{CLOB_BASE}/simplified-markets"
+        url = f"{CLOB_BASE}/markets"
         params = {"next_cursor": cursor} if cursor else {}
         
         try:
