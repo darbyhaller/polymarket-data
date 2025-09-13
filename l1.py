@@ -21,7 +21,7 @@ All monetary/size fields remain fixed-point integers:
 - sizes:  uint64 (size  * 10_000)
 
 Usage:
-  python build_l1_from_parquets.py \
+  python l1.py \
       --input-root /var/data/polymarket/parquets \
       --output-root /var/data/polymarket/l1 \
       [--start "2025-09-05T00:00:00Z" --end "2025-09-07T00:00:00Z"] \
@@ -84,28 +84,60 @@ def derive_l1_batch_sorted_by_ts(batch: pa.RecordBatch) -> pa.RecordBatch:
 
     Inputs: recv_ts_ms, asset_id, market, market_title, outcome, timestamp, bids, asks
     """
-    bids = batch.column(batch.schema.get_field_index("bids"))
-    asks = batch.column(batch.schema.get_field_index("asks"))
-
-    best_bid = pc.list_element(bids, 0)
-    best_ask = pc.list_element(asks, 0)
-
-    bid_px = pc.struct_field(best_bid, "price").cast(pa.uint32())
-    bid_sz = pc.struct_field(best_bid, "size").cast(pa.uint64())
-    ask_px = pc.struct_field(best_ask, "price").cast(pa.uint32())
-    ask_sz = pc.struct_field(best_ask, "size").cast(pa.uint64())
-
-    both_present = pc.and_(pc.invert(pc.is_null(bid_px)), pc.invert(pc.is_null(ask_px)))
-    mid_px = pc.if_else(
-        both_present,
-        pc.cast(pc.divide(pc.add(pc.cast(bid_px, pa.uint64()), pc.cast(ask_px, pa.uint64())), 2), pa.uint32()),
-        pc.nulls_like(bid_px),
-    )
-    spread_px = pc.if_else(
-        both_present,
-        pc.cast(pc.subtract(pc.cast(ask_px, pa.uint64()), pc.cast(bid_px, pa.uint64())), pa.uint32()),
-        pc.nulls_like(bid_px),
-    )
+    # Convert to Python objects for easier processing
+    bids_column = batch.column(batch.schema.get_field_index("bids"))
+    asks_column = batch.column(batch.schema.get_field_index("asks"))
+    
+    # Process each row to extract best bid/ask
+    num_rows = batch.num_rows
+    bid_prices = []
+    bid_sizes = []
+    ask_prices = []
+    ask_sizes = []
+    
+    for i in range(num_rows):
+        bids = bids_column[i].as_py() if not bids_column[i].is_valid else []
+        asks = asks_column[i].as_py() if not asks_column[i].is_valid else []
+        
+        # Handle bids
+        if bids and len(bids) > 0:
+            best_bid = bids[0]
+            bid_prices.append(int(best_bid['price']))
+            bid_sizes.append(int(best_bid['size']))
+        else:
+            bid_prices.append(None)
+            bid_sizes.append(None)
+            
+        # Handle asks
+        if asks and len(asks) > 0:
+            best_ask = asks[0]
+            ask_prices.append(int(best_ask['price']))
+            ask_sizes.append(int(best_ask['size']))
+        else:
+            ask_prices.append(None)
+            ask_sizes.append(None)
+    
+    # Convert back to PyArrow arrays
+    bid_px = pa.array(bid_prices, type=pa.uint32())
+    bid_sz = pa.array(bid_sizes, type=pa.uint64())
+    ask_px = pa.array(ask_prices, type=pa.uint32())
+    ask_sz = pa.array(ask_sizes, type=pa.uint64())
+    
+    # Calculate mid and spread
+    mid_prices = []
+    spreads = []
+    for i in range(num_rows):
+        bp = bid_prices[i]
+        ap = ask_prices[i]
+        if bp is not None and ap is not None:
+            mid_prices.append((bp + ap) // 2)
+            spreads.append(ap - bp)
+        else:
+            mid_prices.append(None)
+            spreads.append(None)
+    
+    mid_px = pa.array(mid_prices, type=pa.uint32())
+    spread_px = pa.array(spreads, type=pa.uint32())
 
     cols = [
         batch.column(batch.schema.get_field_index("recv_ts_ms")),
@@ -113,13 +145,13 @@ def derive_l1_batch_sorted_by_ts(batch: pa.RecordBatch) -> pa.RecordBatch:
         batch.column(batch.schema.get_field_index("market")),
         batch.column(batch.schema.get_field_index("market_title")),
         batch.column(batch.schema.get_field_index("outcome")),
-        batch.column(batch.schema.get_field_index("timestamp")).cast(pa.int64()).rename("ts_ms"),
-        bid_px.rename("bid_px"),
-        bid_sz.rename("bid_sz"),
-        ask_px.rename("ask_px"),
-        ask_sz.rename("ask_sz"),
-        mid_px.rename("mid_px"),
-        spread_px.rename("spread_px"),
+        batch.column(batch.schema.get_field_index("timestamp")).cast(pa.int64()),
+        bid_px,
+        bid_sz,
+        ask_px,
+        ask_sz,
+        mid_px,
+        spread_px,
     ]
     out = pa.RecordBatch.from_arrays(cols, schema=l1_schema())
 
@@ -178,7 +210,18 @@ def detect_outages(input_root: str, start_ms: Optional[int], end_ms: Optional[in
 
     Returns list of (start_ms, end_ms, duration_ms), sorted by start.
     """
-    dataset = ds.dataset(input_root, format="parquet", partitioning="hive")
+    # Filter out .inprogress files
+    dataset = ds.dataset(
+        input_root,
+        format="parquet",
+        partitioning="hive",
+        exclude_invalid_files=True
+    )
+    # Additional filtering for .inprogress files
+    valid_files = [f for f in dataset.files if not f.endswith('.inprogress')]
+    if not valid_files:
+        return []
+    dataset = ds.dataset(valid_files, format="parquet", partitioning="hive")
     filt = (ds.field("event_type") == "last_trade_price")
     if start_ms is not None:
         filt = filt & (ds.field("timestamp") >= start_ms)
@@ -191,7 +234,7 @@ def detect_outages(input_root: str, start_ms: Optional[int], end_ms: Optional[in
     except Exception:
         total_rows = None
 
-    scanner = dataset.scan(
+    scanner = dataset.scanner(
         columns=["timestamp"],
         filter=filt,
         use_threads=True,
@@ -245,7 +288,19 @@ def main():
     end_ms = parse_iso8601(args.end)
 
     # ==== L1 BUILD (from book events), sorted by exchange timestamp ====
-    dataset = ds.dataset(args.input_root, format="parquet", partitioning="hive")
+    # Filter out .inprogress files
+    temp_dataset = ds.dataset(
+        args.input_root,
+        format="parquet",
+        partitioning="hive",
+        exclude_invalid_files=True
+    )
+    # Additional filtering for .inprogress files
+    valid_files = [f for f in temp_dataset.files if not f.endswith('.inprogress')]
+    if not valid_files:
+        print("No valid parquet files found (all are .inprogress)")
+        return
+    dataset = ds.dataset(valid_files, format="parquet", partitioning="hive")
     filt = (ds.field("event_type") == "book")
     if start_ms is not None:
         filt = filt & (ds.field("timestamp") >= start_ms)
@@ -256,8 +311,40 @@ def main():
         "recv_ts_ms",
         "asset_id",
         "market",
-        "m",
+        "market_title",
+        "outcome",
+        "timestamp",
+        "bids",
+        "asks",
     ]
+
+    # Process book events to build L1
+    try:
+        total_rows = dataset.count_rows(filter=filt)
+    except Exception:
+        total_rows = None
+
+    scanner = dataset.scanner(
+        columns=columns,
+        filter=filt,
+        use_threads=True,
+        batch_size=args.batch_size,
+    )
+
+    batches = []
+    pbar = tqdm(desc="Processing book events", unit="rows", total=total_rows)
+    for batch in scanner.to_batches():
+        l1_batch = derive_l1_batch_sorted_by_ts(batch)
+        batches.append(l1_batch)
+        pbar.update(batch.num_rows)
+    pbar.close()
+
+    if batches:
+        print(f"Writing L1 data to {args.output_file}")
+        write_single_parquet_sorted(batches, args.output_file, args.compression, args.row_group_size)
+        print(f"L1 data written to {args.output_file}")
+    else:
+        print("No book events found for the specified time range")
 
     # ==== OUTAGE DETECTION (from last_trade_price events) ====
     threshold_ms = int(args.outage_threshold_seconds * 1000)
