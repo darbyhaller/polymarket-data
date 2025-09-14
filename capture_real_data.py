@@ -151,7 +151,9 @@ def on_message(ws, msg):
                     continue
                 outcome = asset_outcome.get(aid, "")
             market_hash = hash((aid, d.get('market')))
-            # SAVE OUTCOME,
+            # SAVE market_hash -> (outcome, aid, market, market title) in external dictionary to improve performance.
+            # EMIT MULTIPLE EVENTS if there's more than one change, so we can store flat
+            # EMIT BOOK as just being many price_change events
             base = {
                 "recv_ts_ms": recv_ms,
                 "market_hash": market_hash,

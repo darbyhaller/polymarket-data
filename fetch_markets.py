@@ -5,7 +5,6 @@ Saves results to markets_cache.json with cursor state for incremental updates.
 """
 
 import json
-import time
 import requests
 import os
 from datetime import datetime
@@ -53,7 +52,6 @@ def save_cache(markets_data, cursor):
     """Save market cache and cursor state in JSONL format (one market per line)."""
     try:
         with open(CACHE_FILE, 'w') as f:
-            # First line: metadata
             metadata = {
                 'last_cursor': cursor,
                 'updated_at': datetime.utcnow().isoformat(),
@@ -61,8 +59,6 @@ def save_cache(markets_data, cursor):
                 '_type': 'metadata'
             }
             f.write(json.dumps(metadata, separators=(',', ':')) + '\n')
-            
-            # Each market on its own line
             for condition_id, market in markets_data.items():
                 market_with_id = {
                     'condition_id': condition_id,
@@ -70,42 +66,39 @@ def save_cache(markets_data, cursor):
                     **market
                 }
                 f.write(json.dumps(market_with_id, separators=(',', ':')) + '\n')
-                
-        print(f"Saved {len(markets_data)} markets to cache (JSONL format)")
+
     except Exception as e:
         print(f"Error saving cache: {e}")
 
 def fetch_markets_from_cursor(start_cursor=""):
     """Fetch markets starting from a specific cursor."""
     cursor = start_cursor
-    markets_fetched = 0
-    
     while True:
         url = f"{CLOB_BASE}/markets"
         params = {"next_cursor": cursor} if cursor else {}
-        
         try:
             r = requests.get(url, params=params, timeout=20)
             r.raise_for_status()
             page = r.json()
             data = page.get("data", [])
-            
             if not data:
-                return cursor  # no more data; return last valid cursor
-                
-            markets_fetched += len(data)
-            
+                # No data at this cursor; we're done.
+                # We won't rely on a 'return value' from the generator.
+                break
+
             next_cursor = page.get("next_cursor") or "LTE="
-            # Yield the whole page with the next_cursor
-            yield data, next_cursor
-            
+
+            # IMPORTANT: yield the cursor we USED for this fetch, plus the data and next_cursor
+            yield cursor, data, next_cursor
+
             if next_cursor == "LTE=":
-                return cursor  # return the cursor we used for this page, not "LTE="
+                break  # reached the end
             cursor = next_cursor
-                
+
         except Exception as e:
             print(f"Error fetching markets: {e}")
-            return cursor
+            break
+
 
 def update_markets_cache(full_refresh=False):
     """Update the markets cache incrementally or do full refresh."""
@@ -122,13 +115,11 @@ def update_markets_cache(full_refresh=False):
     new_markets = 0
     final_cursor = start_cursor
     
-    for data, next_cursor in fetch_markets_from_cursor(start_cursor):
+    for cursor_used, data, next_cursor in fetch_markets_from_cursor(start_cursor):
         for market in data:
             condition_id = market.get("condition_id")
-                
             if condition_id not in markets_data:
                 new_markets += 1
-                
             markets_data[condition_id] = market
         # Only advance cursor if it's not the end marker
         if next_cursor != "LTE=":
