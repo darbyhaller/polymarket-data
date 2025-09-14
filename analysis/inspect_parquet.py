@@ -1,10 +1,9 @@
 import pandas as pd
 
 # Replace with your parquet filename
-filename = "parquets/event_type=price_change/year=2025/month=09/day=13/hour=21/events-001.parquet"
+filename = "parquets/event_type=order_update_BUY/year=2025/month=09/day=14/hour=18/events-000.parquet"
 
 df = pd.read_parquet(filename)
 print(df.dtypes)
-print([len(c) for c in df['changes']])
 
-print(df['market'])
+print(df.head())

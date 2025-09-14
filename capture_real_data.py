@@ -3,11 +3,11 @@ import json, time, random, os, signal, threading
 import websocket  # pip install websocket-client
 from threading import Lock, Event
 from fetch_markets import get_tradeable_asset_mappings
-from parquet_writer import write_event, init_writer, close_writer
+from parquet_writer import EventTypeParquetWriter
+import hashlib
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
-OUTDIR = os.path.join(os.getenv('PARQUET_ROOT', '/var/data/polymarket'), 'parquets')
 MARKETS_UPDATE_INTERVAL = 10
 PING_INTERVAL = 30
 PING_TIMEOUT = 10
@@ -37,6 +37,8 @@ sent_version = -1
 should_stop = Event()
 last_message_time = 0.0
 backoff = BACKOFF_MIN  # Global backoff state
+
+writer = EventTypeParquetWriter()
 
 def update_asset_mappings_from_api():
     global subs_version, previous_allowed_asset_ids
@@ -80,21 +82,6 @@ def markets_poll_loop():
             break
         update_asset_mappings_from_api()
 
-def file_health_monitor():
-    """Monitor parquet writer health."""
-    while not should_stop.is_set():
-        if should_stop.wait(30):  # Check every 30 seconds
-            break
-        
-        # Parquet writer is more robust, but we can still do periodic flushes
-        try:
-            from parquet_writer import writer
-            if writer:
-                writer.flush()
-                writer.close_completed_hours()
-        except Exception as e:
-            print(f"Parquet writer flush failed: {e}")
-
 def send_subscription(ws):
     global subscribed_asset_ids
     with data_lock:
@@ -132,35 +119,23 @@ def on_message(ws, msg):
 
         payload = json.loads(s)
 
-        events = payload if isinstance(payload, list) else [payload]
-        for d in events:
+        for d in payload:
             et = d["event_type"]
-            aid = d["asset_id"]
+            h = int.from_bytes(hashlib.blake2s(d["asset_id"].encode("utf-8"), digest_size=8).digest(), "big", signed=True)
 
-            with data_lock:
-                if aid not in allowed_asset_ids:
-                    continue
-                outcome = asset_outcome.get(aid, "")
-
-            market_hash = hash((aid, d.get('market')))
-            # market_hash_to_market[market_hash] = {outcome, market, aid, question}
-
-            # Common base (copied into each emitted event)
             common = {
                 "recv_ts_ms": recv_ms,
-                "market_hash": market_hash,
-                "timestamp": d["timestamp"],
+                "asset_hash": h,
+                "timestamp": int(d["timestamp"]),
             }
 
             def emit_price_event(price: str, size: str, side: str):
                 evt = dict(common)
                 evt.update({
-                    "event_type": "price",   # unified type
-                    "price": price,
-                    "size": size,
-                    "side": side,
+                    "price": float(price),
+                    "size": float(size),
                 })
-                write_event(evt)
+                writer.write("order_update_"+side, evt)
 
             if et == "book":
                 # Flatten bids (BUY) and asks (SELL)
@@ -174,40 +149,24 @@ def on_message(ws, msg):
                 for ch in d["changes"]:
                     emit_price_event(ch.get("price"), ch.get("size"), ch.get("side"))
 
-            elif et == "tick_size_change":
-                evt = dict(common)
-                evt.update({
-                    "event_type": "tick_size_change",
-                    "old_tick_size": d.get("old_tick_size"),
-                    "new_tick_size": d.get("new_tick_size"),
-                })
-                # Copy any other fields to preserve context
-                for k, v in d.items():
-                    if k not in evt:
-                        evt[k] = v
-                write_event(evt)
-
             elif et == "last_trade_price":
                 evt = dict(common)
                 evt.update({
-                    "event_type": "last_trade_price",
-                    "price": d.get("price"),
-                    "size": d.get("size"),
-                    "side": d.get("side"),
-                    "fee_rate_bps": d.get("fee_rate_bps"),
+                    "price": float(d.get("price")),
+                    "size": float(d.get("size")),
+                    "fee_rate_bps": float(d.get("fee_rate_bps")),
                 })
-                for k, v in d.items():
-                    if k not in evt:
-                        evt[k] = v
-                write_event(evt)
+                writer.write("last_trade_price_"+d.get("side"), evt)
 
+            # e.g. tick_size_change
             else:
-                # Pass through unknown types unchanged (still flatten-ready if needed later)
                 evt = dict(common)
                 for k, v in d.items():
                     if k not in evt:
                         evt[k] = v
-                write_event(evt)
+                evt['event_type'] = et
+                writer.write("other", evt)
+
     except Exception as e:
         print(f"on_message error: {e}")
 
@@ -264,7 +223,7 @@ def watchdog(ws):
 def handle_signal(signum, frame):
     print(f"Signal {signum}: stopping")
     should_stop.set()
-    close_writer()
+    writer.close()
     # Force exit if signal handler is called multiple times
     if hasattr(handle_signal, '_called'):
         print("Force exit")
@@ -298,10 +257,8 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    init_writer(root=OUTDIR)
     update_asset_mappings_from_api()
     threading.Thread(target=markets_poll_loop, daemon=True).start()
-    threading.Thread(target=file_health_monitor, daemon=True).start()
 
     global backoff
     ws = None
@@ -363,7 +320,7 @@ def main():
             pass
 
     print("WebSocket loop exited")
-    close_writer()
+    writer.close()
 
 if __name__ == "__main__":
     main()
