@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-filename = "parquets/event_type=order_update_BUY/year=2025/month=09/day=14/hour=19/events-003.parquet"
+filename = "parquets/event_type=order_update_BUY/year=2025/month=09/day=14/hour=22/events-001.parquet"
 
 # Load
 df = pd.read_parquet(filename)
@@ -26,3 +26,9 @@ plt.ylabel("recv_ts_ms - timestamp (seconds)")
 plt.title("Network/processing lag over time")
 plt.tight_layout()
 plt.show()
+
+ts = np.array(df['timestamp'])/1000
+gaps = np.diff(ts)
+idxs = np.where(gaps > 1)[0]
+print(len(idxs))
+print(len(ts))

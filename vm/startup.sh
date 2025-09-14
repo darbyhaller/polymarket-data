@@ -17,7 +17,6 @@ BUCKET=${BUCKET:-polymarket-raw-polymarket-470619}
 LOCAL_RETENTION_DAYS=${LOCAL_RETENTION_DAYS:-3}
 DATA_DISK_NAME=${DATA_DISK_NAME:-polymarket-data}
 PARQUET_ROOT=${PARQUET_ROOT:-/var/data/polymarket}
-ROTATE_MB=${ROTATE_MB:-512}
 
 # --- overlay from instance metadata if present (base64 or plain) ---
 set +u
@@ -40,7 +39,6 @@ BUCKET="$BUCKET"
 LOCAL_RETENTION_DAYS="$LOCAL_RETENTION_DAYS"
 DATA_DISK_NAME="$DATA_DISK_NAME"
 PARQUET_ROOT="$PARQUET_ROOT"
-ROTATE_MB="$ROTATE_MB"
 EOF
 chmod 0644 /etc/polymarket/polymarket.env
 
