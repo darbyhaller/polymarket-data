@@ -18,8 +18,8 @@ class EventTypeParquetWriter:
     def __init__(self):
         self.root = os.path.join(os.getenv('PARQUET_ROOT', '/var/data/polymarket'), 'parquets')
         self.compression = os.getenv("PM_COMPRESSION", "zstd")
-        self.batch_size = int(os.getenv("PM_BATCH_SIZE", "100_000"))
-        self.rows_per_file = int(os.getenv("PM_ROWS_PER_FILE", "1_000_000"))
+        self.batch_size = int(os.getenv("PM_BATCH_SIZE", "1_000_000"))
+        self.rows_per_file = int(os.getenv("PM_ROWS_PER_FILE", "10_000_000"))
         
         self.lock = threading.Lock()
         
@@ -60,8 +60,10 @@ class EventTypeParquetWriter:
             tmp_path,
             schema=schema,
             compression=self.compression,
-            use_dictionary=True,
+            use_dictionary=False,
             write_statistics=True,
+            data_page_version="2.0",
+            use_byte_stream_split=["price","size","fee_rate_bps"],
         )
         self.rows_written[file_key] = 0
         # Store final path separately for atomic rename on close
@@ -161,6 +163,15 @@ class EventTypeParquetWriter:
         # Write each hourly group
         for hour_dt, hour_events in hourly_groups.items():
             self._write_batch(event_type, hour_dt, hour_events)
+
+    def _next_seq(self, file_key: str) -> int:
+        self.file_sequences[file_key] += 1
+        return self.file_sequences[file_key]
+
+    def _file_path(self, event_type: str, dt: datetime, seq: int) -> str:
+        partition_dir = self._partition_path(event_type, dt)
+        os.makedirs(partition_dir, exist_ok=True)
+        return os.path.join(partition_dir, f"events-{seq:03d}.parquet")
     
     def _write_batch(self, event_type: str, hour_dt: datetime, events: List[Dict[str, Any]]):
         """Write a batch of events to parquet. Must hold lock."""
@@ -181,17 +192,19 @@ class EventTypeParquetWriter:
                     rotate = True
 
             if rotate:
-                self.file_sequences[file_key] += 1
-                self._close_writer(file_key)
+                self._close_writer(file_key)  # don't bump here; opening decides seq
 
-            # Ensure a writer exists for this file_key
             if file_key not in self.writers:
-                path = self._file_path(event_type, hour_dt)
+                seq = self._next_seq(file_key)                       # bump on every (re)open
+                path = self._file_path(event_type, hour_dt, seq)
+                while os.path.exists(path) or os.path.exists(path + ".inprogress"):
+                    seq = self._next_seq(file_key)                   # ensure uniqueness
+                    path = self._file_path(event_type, hour_dt, seq)
                 self.current_hour[file_key] = hour_dt
                 self._open_writer(file_key, schema, path)
 
             # Write this batch as a new row group with optimal row group size
-            events.sort(key=lambda e: (e["asset_hash"], e["timestamp"]))
+            events.sort(key=lambda e: (e["timestamp"], e["asset_hash"]))
             table = pa.Table.from_pylist(events, schema=schema)
             self.writers[file_key].write_table(table)
             self.rows_written[file_key] += table.num_rows
