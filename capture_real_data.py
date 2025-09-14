@@ -82,6 +82,15 @@ def markets_poll_loop():
             break
         update_asset_mappings_from_api()
 
+def finalizer_loop():
+    # How often to check; 60s is plenty and very cheap
+    interval = int(os.getenv("PM_FINALIZE_INTERVAL_SEC", "60"))
+    grace = int(os.getenv("PM_GRACE_MINUTES", "15"))
+    while not should_stop.is_set():
+        writer.close_completed_hours(grace_minutes=grace)
+        if should_stop.wait(interval):
+            break
+
 def send_subscription(ws):
     global subscribed_asset_ids
     with data_lock:
@@ -259,6 +268,7 @@ def main():
 
     update_asset_mappings_from_api()
     threading.Thread(target=markets_poll_loop, daemon=True).start()
+    threading.Thread(target=finalizer_loop, daemon=True).start()
 
     global backoff
     ws = None
