@@ -59,6 +59,7 @@ class EventTypeParquetWriter:
         self.writers[file_key] = pq.ParquetWriter(
             tmp_path,
             schema=schema,
+            compression_level=3,
             compression=self.compression,
             use_dictionary=False,
             write_statistics=True,
