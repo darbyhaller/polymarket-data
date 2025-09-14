@@ -124,66 +124,90 @@ def on_message(ws, msg):
     last_message_time = time.time()
     recv_ms = int(last_message_time * 1000)
     try:
-        if isinstance(msg, (bytes, bytearray)):
-            try:
-                msg = msg.decode("utf-8", errors="replace")
-            except Exception:
-                return
+        msg = msg.decode("utf-8", errors="replace")
         s = msg.strip()
-        if not s:
-            return
         if s[0] not in "[{":
             # e.g. "pong"
             return
 
-        try:
-            payload = json.loads(s)
-        except json.JSONDecodeError as e:
-            print(f"JSON decode failed at pos {e.pos}: {s[:120]!r}")
-            return
+        payload = json.loads(s)
 
         events = payload if isinstance(payload, list) else [payload]
         for d in events:
             et = d["event_type"]
             aid = d["asset_id"]
+
             with data_lock:
                 if aid not in allowed_asset_ids:
                     continue
                 outcome = asset_outcome.get(aid, "")
+
             market_hash = hash((aid, d.get('market')))
-            # SAVE market_hash -> (outcome, aid, market, market title) in external dictionary to improve performance.
-            # EMIT MULTIPLE EVENTS if there's more than one change, so we can store flat
-            # EMIT BOOK as just being many price_change events
-            base = {
+            # market_hash_to_market[market_hash] = {outcome, market, aid, question}
+
+            # Common base (copied into each emitted event)
+            common = {
                 "recv_ts_ms": recv_ms,
                 "market_hash": market_hash,
-                "timestamp": d.get("timestamp"),
+                "timestamp": d["timestamp"],
             }
+
+            def emit_price_event(price: str, size: str, side: str):
+                evt = dict(common)
+                evt.update({
+                    "event_type": "price",   # unified type
+                    "price": price,
+                    "size": size,
+                    "side": side,
+                })
+                write_event(evt)
+
             if et == "book":
-                base.update({
-                    "bids": d.get("bids") or d.get("buys") or [],
-                    "asks": d.get("asks") or d.get("sells") or [],
-                })
+                # Flatten bids (BUY) and asks (SELL)
+                for lvl in d["bids"]:
+                    emit_price_event(lvl.get("price"), lvl.get("size"), "BUY")
+                for lvl in d["asks"]:
+                    emit_price_event(lvl.get("price"), lvl.get("size"), "SELL")
+
             elif et == "price_change":
-                base.update({
-                    "changes": d.get("changes", []),
-                })
+                # Flatten each change as a "price" event
+                for ch in d["changes"]:
+                    emit_price_event(ch.get("price"), ch.get("size"), ch.get("side"))
+
             elif et == "tick_size_change":
-                base.update({
+                evt = dict(common)
+                evt.update({
+                    "event_type": "tick_size_change",
                     "old_tick_size": d.get("old_tick_size"),
                     "new_tick_size": d.get("new_tick_size"),
                 })
+                # Copy any other fields to preserve context
+                for k, v in d.items():
+                    if k not in evt:
+                        evt[k] = v
+                write_event(evt)
+
             elif et == "last_trade_price":
-                base.update({
+                evt = dict(common)
+                evt.update({
+                    "event_type": "last_trade_price",
                     "price": d.get("price"),
                     "size": d.get("size"),
                     "side": d.get("side"),
                     "fee_rate_bps": d.get("fee_rate_bps"),
                 })
-            for k, v in d.items():
-                if k not in base:
-                    base[k] = v
-            write_event(base)
+                for k, v in d.items():
+                    if k not in evt:
+                        evt[k] = v
+                write_event(evt)
+
+            else:
+                # Pass through unknown types unchanged (still flatten-ready if needed later)
+                evt = dict(common)
+                for k, v in d.items():
+                    if k not in evt:
+                        evt[k] = v
+                write_event(evt)
     except Exception as e:
         print(f"on_message error: {e}")
 

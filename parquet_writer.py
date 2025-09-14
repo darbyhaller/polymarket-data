@@ -391,6 +391,7 @@ writer: Optional[EventTypeParquetWriter] = None
 
 
 def write_event(event: Dict[str, Any]):
+    print(event)
     """Write a single event using the global writer instance."""
     global writer
     if writer is not None:
