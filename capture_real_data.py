@@ -87,6 +87,7 @@ def finalizer_loop():
     interval = int(os.getenv("PM_FINALIZE_INTERVAL_SEC", "60"))
     grace = int(os.getenv("PM_GRACE_MINUTES", "15"))
     while not should_stop.is_set():
+        writer.flush()
         writer.close_completed_hours(grace_minutes=grace)
         if should_stop.wait(interval):
             break
