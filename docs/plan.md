@@ -1,7 +1,5 @@
 ## Pain Points
-last_trade_price STILL NOT WRITING on hour
-order_update still .5% corrupt. invalid footer. why?
-- It's always the last one in the hour
+Mark any time periods where there haven't been any websocket updates for ANY market for 1 second as "PRICE UNKNOWN" rather than assuming constant price
 
 ## Future Directions
 * Ground with search
