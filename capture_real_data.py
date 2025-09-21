@@ -17,9 +17,8 @@ CLOB_BASE = "https://clob.polymarket.com"
 SUB_BATCH = int(os.getenv("SUB_BATCH", "1000"))
 SUB_PAUSE_SEC = float(os.getenv("SUB_PAUSE_SEC", ".1"))
 MARKETS_UPDATE_INTERVAL = 10
-PING_INTERVAL = 120
-PING_TIMEOUT = 60
-FSYNC_EVERY_SEC = 5.0
+PING_INTERVAL = 30
+PING_TIMEOUT = 10
 
 # If we stop seeing traffic for this long, force-close and reconnect.
 STALL_TIMEOUT = 90
