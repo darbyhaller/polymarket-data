@@ -5,7 +5,7 @@ set -euo pipefail
 PROJECT="${PROJECT:-polymarket-470619}"; REGION="${REGION:-us-central1}"; ZONE="${ZONE:-us-central1-a}"
 VM_NAME="${VM_NAME:-polymarket-vm}"
 MACHINE_TYPE="${MACHINE_TYPE:-}" CUSTOM_CPU="${CUSTOM_CPU:-1}" CUSTOM_MEMORY="${CUSTOM_MEMORY:-4GB}"
-VM_SCOPES="${VM_SCOPES:-https://www.googleapis.com/auth/devstorage.read_write}"
+VM_SCOPES="${VM_SCOPES:-https://www.googleapis.com/auth/cloud-platform}"
 DATA_DISK_NAME="${DATA_DISK_NAME:-polymarket-data}" DATA_DISK_SIZE_GB="${DATA_DISK_SIZE_GB:-200}"
 BUCKET="${BUCKET:-polymarket-raw-$PROJECT}" ARCHIVE_AFTER_DAYS="${ARCHIVE_AFTER_DAYS:-365}"
 REPO_URL="${REPO_URL:-https://github.com/darbyhaller/polymarket-data}" REPO_BRANCH="${REPO_BRANCH:-main}"

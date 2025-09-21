@@ -54,6 +54,41 @@ if ! command -v gcloud >/dev/null 2>&1; then
   apt-get update -y && apt-get install -y google-cloud-cli
 fi
 
+if ! dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
+  curl -sS https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh | bash
+  apt-get update -y
+  apt-get install -y google-cloud-ops-agent
+fi
+
+mkdir -p /etc/google-cloud-ops-agent
+cat >/etc/google-cloud-ops-agent/config.yaml <<'YAML'
+logging:
+  receivers:
+    polymarket_journald:
+      type: journald
+      include_units: ["polymarket.service"]
+    startup_journald:
+      type: journald
+      include_units: ["google-startup-scripts.service"]
+  service:
+    pipelines:
+      polymarket:
+        receivers: [polymarket_journald]
+      startup:
+        receivers: [startup_journald]
+metrics:
+  receivers:
+    hostmetrics:
+      type: hostmetrics
+  service:
+    pipelines:
+      default:
+        receivers: [hostmetrics]
+YAML
+
+systemctl enable --now google-cloud-ops-agent
+systemctl restart google-cloud-ops-agent || true
+
 # --- data disk mount + fstab ---
 MOUNT_POINT="$PARQUET_ROOT"
 mkdir -p "$MOUNT_POINT"
