@@ -8,7 +8,7 @@ import hashlib
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
-MARKETS_UPDATE_INTERVAL = 60
+MARKETS_UPDATE_INTERVAL = 10
 PING_INTERVAL = 30
 PING_TIMEOUT = 10
 FSYNC_EVERY_SEC = 5.0
