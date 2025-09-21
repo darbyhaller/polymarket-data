@@ -7,21 +7,12 @@ Partitioned by event_type with optimized schemas for each event type.
 from datetime import timedelta
 import os
 import threading
-import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Any
 from collections import defaultdict, deque
 import time
 import pyarrow as pa
 import pyarrow.parquet as pq
-
-# Configure logging for journalctl
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
 
 class EventTypeParquetWriter:
     def __init__(self):
@@ -86,7 +77,7 @@ class EventTypeParquetWriter:
             try:
                 w.close()
             except Exception as e:
-                logger.error(f"Error closing parquet writer: {e}")
+                print(e)
             
             # Atomic rename from .inprogress to final path
             final_path = self.current_files.get(file_key)
@@ -95,7 +86,7 @@ class EventTypeParquetWriter:
                 try:
                     os.replace(tmp_path, final_path)
                 except Exception as e:
-                    logger.error(f"Atomic rename failed for {tmp_path} -> {final_path}: {e}")
+                    print(f"Atomic rename failed for {tmp_path} -> {final_path}: {e}")
 
     def close_completed_hours(self, grace_minutes=15):
         """Close writers that are older than current hour minus grace period.
@@ -114,7 +105,7 @@ class EventTypeParquetWriter:
                 to_close.append(key)
         
         if to_close:
-            logger.info(f"Closing {len(to_close)} writers older than {cutoff_time} (grace period: {grace_minutes}min)")
+            print(f"Closing {len(to_close)} writers older than {cutoff_time} (grace period: {grace_minutes}min)")
         
         for key in to_close:
             self._close_writer(key)
@@ -221,7 +212,7 @@ class EventTypeParquetWriter:
             
         except Exception as e:
             # Log error but don't crash the writer
-            logger.error(f"Error writing parquet batch for {event_type}: {e}")
+            print(f"Error writing parquet batch for {event_type}: {e}")
     
     def flush(self):
         """Flush all buffered events."""

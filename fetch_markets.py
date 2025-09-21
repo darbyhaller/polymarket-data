@@ -7,16 +7,7 @@ Saves results to markets_cache.json with cursor state for incremental updates.
 import json
 import requests
 import os
-import logging
 from datetime import datetime
-
-# Configure logging for journalctl
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
 
 CLOB_BASE = "https://clob.polymarket.com"
 CACHE_FILE = "markets_cache.json"
@@ -51,9 +42,9 @@ def load_cache():
                     cache = json.load(f)
                     markets_data = cache.get('markets', {})
                     last_cursor = cache.get('last_cursor', '')
-                    logger.info(f"Loaded {len(markets_data)} cached markets from old format")
+                    print(f"Loaded {len(markets_data)} cached markets from old format")
             except:
-                logger.error(f"Error loading cache: {e}")
+                print(f"Error loading cache: {e}")
     
     return markets_data, last_cursor
 
@@ -77,7 +68,7 @@ def save_cache(markets_data, cursor):
                 f.write(json.dumps(market_with_id, separators=(',', ':')) + '\n')
 
     except Exception as e:
-        logger.error(f"Error saving cache: {e}")
+        print(f"Error saving cache: {e}")
 
 def fetch_markets_from_cursor(start_cursor=""):
     """Fetch markets starting from a specific cursor."""
@@ -105,7 +96,7 @@ def fetch_markets_from_cursor(start_cursor=""):
             cursor = next_cursor
 
         except Exception as e:
-            logger.error(f"Error fetching markets: {e}")
+            print(f"Error fetching markets: {e}")
             break
 
 
@@ -114,11 +105,11 @@ def update_markets_cache(full_refresh=False):
     markets_data, last_cursor = load_cache()
     
     if full_refresh:
-        logger.info("Performing full refresh...")
+        print("Performing full refresh...")
         markets_data = {}
         start_cursor = ""
     else:
-        logger.info(f"Performing incremental update from cursor: {last_cursor[:20]}")
+        print(f"Performing incremental update from cursor: {last_cursor[:20]}")
         start_cursor = last_cursor
     
     new_markets = 0
@@ -135,7 +126,7 @@ def update_markets_cache(full_refresh=False):
             final_cursor = next_cursor
     
     if new_markets > 0:
-        logger.info(f"Update complete: {new_markets} new")
+        print(f"Update complete: {new_markets} new")
         save_cache(markets_data, final_cursor)
     return markets_data
 
@@ -230,7 +221,7 @@ def get_tradeable_asset_mappings(force_update=False):
         if os.path.exists(CACHE_FILE):
             markets = update_markets_cache(full_refresh=False)
         else:
-            logger.info("No cache found, performing full refresh...")
+            print("No cache found, performing full refresh...")
             markets = update_markets_cache(full_refresh=True)
     
     # Get tradeable markets and extract mappings
@@ -251,7 +242,7 @@ if __name__ == "__main__":
     else:
         mappings = get_tradeable_asset_mappings(force_update=False)
     
-    logger.info(f"\nSummary:")
-    logger.info(f"Total markets: {mappings['total_markets']}")
-    logger.info(f"Tradeable markets: {mappings['tradeable_markets']}")
-    logger.info(f"Asset IDs for subscription: {len(mappings['allowed_asset_ids'])}")
+    print(f"\nSummary:")
+    print(f"Total markets: {mappings['total_markets']}")
+    print(f"Tradeable markets: {mappings['tradeable_markets']}")
+    print(f"Asset IDs for subscription: {len(mappings['allowed_asset_ids'])}")
