@@ -90,12 +90,31 @@ class EventTypeParquetWriter:
                 except Exception as e:
                     print(f"Atomic rename failed for {tmp_path} -> {final_path}: {e}")
 
+    def _flush_old_buffers(self):
+        """Flush buffers whose events belong to a past hour (relative to 'now')."""
+        now = datetime.fromtimestamp(time.time(), timezone.utc)
+        now_hour = now.replace(minute=0, second=0, microsecond=0)
+
+        with self.lock:
+            for et, buf in list(self.buffers.items()):
+                if not buf:
+                    continue
+                # Use same partitioning timestamp you already use elsewhere
+                first = buf[0]
+                recv_ts_ms = first["timestamp"] + first["delay"]
+                evt_hour = datetime.fromtimestamp(recv_ts_ms / 1000, timezone.utc).replace(minute=0, second=0, microsecond=0)
+                # If the buffer's hour is in the past, flush this event type
+                if evt_hour < now_hour:
+                    self._flush_event_type(et)
+
     def close_completed_hours(self, grace_minutes=15):
         """Close writers that are older than current hour minus grace period.
         
         This prevents late events from causing file collisions by keeping writers
         open for a grace period after their hour boundary.
         """
+        # ensure small buffers from last hour are materialized before we close/rotate
+        self._flush_old_buffers()
         
         now = datetime.fromtimestamp(time.time(), timezone.utc)
         # Close writers for hours that ended more than grace_minutes ago
