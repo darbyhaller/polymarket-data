@@ -8,29 +8,19 @@ Compute L1 (best bid/ask) updates from Polymarket parquet dumps.
 - Emits JSONL events:
   - {event_type: "l1_update", timestamp, asset_id, market_title, outcome, side: "buy"|"sell", price}
   - {event_type: "outage", timestamp}  (timestamp = start of outage = prev_ts + 1000)
-- Ignores *.inprogress temp files.
-
-Assumptions:
-- Parquet writer stored prices as uint32 = price * 10000, sizes as uint64 = size * 10000.
 
 Usage:
     python analysis/l1.py --root ./parquets --out l1.jsonl --verbose
 """
 
-import argparse
-import json
 import os
 import sys
 from glob import glob
 
-import pyarrow.parquet as pq
 import pyarrow as pa
-from tqdm import tqdm
 
 # Import the asset-to-question mapping function
 sys.path.append(os.path.dirname(__file__))
-from asset_id_to_question import build_token_to_question_map
-from tqdm import tqdm
 
 # ---------- Config ----------
 PRICE_SCALE = 10000.0     # uint32 -> float
@@ -96,8 +86,7 @@ def get_schema_for_event_type(event_type: str) -> pa.Schema:
 
 def list_parquet_files(root, event_type):
     base = os.path.join(root, f"event_type={event_type}")
-    return sorted([p for p in glob(os.path.join(base, "**", "*.parquet"), recursive=True)
-            if not p.endswith(".inprogress")])
+    return sorted([p for p in glob(os.path.join(base, "**", "*.parquet"), recursive=True))
 
 def read_latest_book_per_asset(root, verbose=False, asset_to_question=None):
     files = list_parquet_files(root, "book")
