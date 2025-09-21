@@ -21,7 +21,7 @@ class EventTypeParquetWriter:
         self.batch_size = int(os.getenv("PM_BATCH_SIZE", "1_000_000"))
         self.rows_per_file = int(os.getenv("PM_ROWS_PER_FILE", "10_000_000"))
         
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # nested acquisitions happen via flush -> close_completed_hours -> _flush_old_buffers
         
         # Buffers for each event type - using deque for efficient append/popleft
         self.buffers: Dict[str, deque] = defaultdict(deque)
@@ -237,16 +237,20 @@ class EventTypeParquetWriter:
     
     def flush(self):
         """Flush all buffered events."""
+        # First, flush buffers under the lock
         with self.lock:
             for event_type in list(self.buffers.keys()):
                 self._flush_event_type(event_type)
-            self.close_completed_hours()
+        # Then, rotate/close writers (this function does its own locking)
+        self.close_completed_hours()
     
     def close(self):
         """Flush all buffers and close all open Parquet writers."""
         self.flush()
-        for key in list(self.writers.keys()):
-            self._close_writer(key)
+        with self.lock:
+            for key in list(self.writers.keys()):
+                self._close_writer(key)
+            self.writers.clear()
     
     def __enter__(self):
         return self

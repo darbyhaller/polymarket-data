@@ -4,71 +4,56 @@ Fetch and cache Polymarket simplified markets with cursor-based pagination.
 Saves results to markets_cache.json with cursor state for incremental updates.
 """
 
-import json
+from orjson import dumps, loads
 import requests
 import os
-from datetime import datetime
 
 CLOB_BASE = "https://clob.polymarket.com"
-CACHE_FILE = "markets_cache.json"
+CACHE_FILE = "markets_cache.jsonl"
 CURSOR_FILE = "markets_cursor.txt"
 
-def load_cache():
-    """Load existing market cache and cursor state from JSONL format."""
-    markets_data = {}
-    last_cursor = ""
-    
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    data = json.loads(line)
-                    if data.get('_type') == 'metadata':
-                        last_cursor = data.get('last_cursor', '')
-                    elif data.get('_type') == 'market':
-                        condition_id = data.pop('condition_id', None)
-                        data.pop('_type', None)  # Remove the _type field
-                        if condition_id:
-                            markets_data[condition_id] = data
-                            
-        except Exception as e:
-            # Try loading as old format for backward compatibility
-            try:
-                with open(CACHE_FILE, 'r') as f:
-                    cache = json.load(f)
-                    markets_data = cache.get('markets', {})
-                    last_cursor = cache.get('last_cursor', '')
-                    print(f"Loaded {len(markets_data)} cached markets from old format")
-            except:
-                print(f"Error loading cache: {e}")
-    
-    return markets_data, last_cursor
-
-def save_cache(markets_data, cursor):
-    """Save market cache and cursor state in JSONL format (one market per line)."""
+def load_cursor():
     try:
-        with open(CACHE_FILE, 'w') as f:
-            metadata = {
-                'last_cursor': cursor,
-                'updated_at': datetime.utcnow().isoformat(),
-                'total_markets': len(markets_data),
-                '_type': 'metadata'
-            }
-            f.write(json.dumps(metadata, separators=(',', ':')) + '\n')
-            for condition_id, market in markets_data.items():
-                market_with_id = {
-                    'condition_id': condition_id,
-                    '_type': 'market',
-                    **market
-                }
-                f.write(json.dumps(market_with_id, separators=(',', ':')) + '\n')
+        with open(CURSOR_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
 
-    except Exception as e:
-        print(f"Error saving cache: {e}")
+def save_cursor(cursor: str):
+    tmp = CURSOR_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(cursor)
+    os.replace(tmp, CURSOR_FILE)
+
+def append_cache(new_items, cursor):
+    """Append new markets to cache file atomically."""
+    # new_items: iterable[(condition_id, market_dict)]
+    tmp = CACHE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        for cid, market in new_items:
+            f.write(dumps({"_type": "market", "condition_id": cid, **market}).decode() + "\n")
+    # append atomically
+    with open(CACHE_FILE, "a") as out, open(tmp, "r") as inp:
+        for line in inp:
+            out.write(line)
+    os.remove(tmp)
+    save_cursor(cursor)
+
+def load_cache_streaming():
+    """Load cache by streaming the file (no giant dict reconstruct every 10s)."""
+    markets = {}
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = loads(line)
+                if rec.get("_type") == "market":
+                    cid = rec.pop("condition_id", None)
+                    rec.pop("_type", None)
+                    if cid:
+                        markets[cid] = rec
+    return markets, load_cursor()
 
 def fetch_markets_from_cursor(start_cursor=""):
     """Fetch markets starting from a specific cursor."""
@@ -99,40 +84,49 @@ def fetch_markets_from_cursor(start_cursor=""):
             print(f"Error fetching markets: {e}")
             break
 
-
-def update_markets_cache(full_refresh=False):
-    """Update the markets cache incrementally or do full refresh."""
-    markets_data, last_cursor = load_cache()
+def update_markets_cache_incremental():
+    """Update markets cache incrementally, only appending new records."""
+    markets, cursor = load_cache_streaming()  # load once at process start
+    final_cursor = cursor
+    new_items = []
     
-    if full_refresh:
-        print("Performing full refresh...")
-        markets_data = {}
-        start_cursor = ""
-    else:
-        print(f"Performing incremental update from cursor: {last_cursor[:20]}")
-        start_cursor = last_cursor
-    
-    new_markets = 0
-    final_cursor = start_cursor
-    
-    for cursor_used, data, next_cursor in fetch_markets_from_cursor(start_cursor):
-        for market in data:
-            condition_id = market.get("condition_id")
-            if condition_id not in markets_data:
-                new_markets += 1
-            markets_data[condition_id] = market
-        # Only advance cursor if it's not the end marker
+    for cursor_used, data, next_cursor in fetch_markets_from_cursor(cursor):
+        for m in data:
+            cid = m.get("condition_id")
+            if cid and cid not in markets:
+                markets[cid] = m
+                new_items.append((cid, m))
         if next_cursor != "LTE=":
             final_cursor = next_cursor
+        else:
+            # At the end, sleep longer before next poll to avoid useless work
+            print("Reached end of markets (LTE=), backing off...")
+            break
     
-    if new_markets > 0:
-        print(f"Update complete: {new_markets} new")
-        save_cache(markets_data, final_cursor)
-    return markets_data
+    if new_items:
+        append_cache(new_items, final_cursor)
+        print(f"Update complete: +{len(new_items)} new")
+    else:
+        # Just update cursor if it advanced (rare); otherwise do nothing
+        if final_cursor != cursor:
+            save_cursor(final_cursor)
+    return markets
+
+def update_markets_cache(full_refresh=False):
+    """Legacy wrapper for backward compatibility."""
+    if full_refresh:
+        # For full refresh, clear cache files and start fresh
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
+        if os.path.exists(CURSOR_FILE):
+            os.remove(CURSOR_FILE)
+        print("Performing full refresh...")
+    
+    return update_markets_cache_incremental()
 
 def get_tradeable_markets():
     """Get markets that meet trading criteria: active, not closed, not archived, accepting orders."""
-    markets_data, _ = load_cache()
+    markets_data, _ = load_cache_streaming()
     tradeable = {}
     
     for condition_id, market in markets_data.items():

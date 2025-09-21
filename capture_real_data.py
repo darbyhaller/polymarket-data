@@ -8,7 +8,7 @@ import hashlib
 import logging
 
 logging.basicConfig(
-    level=logging.ERROR,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s"
 )
 
