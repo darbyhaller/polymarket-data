@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
-MARKETS_UPDATE_INTERVAL = 60
+MARKETS_UPDATE_INTERVAL = 15
 PING_INTERVAL = 30
 PING_TIMEOUT = 10
 FSYNC_EVERY_SEC = 5.0
@@ -310,9 +310,9 @@ def main():
                     pass
                 break
             
+            connection_duration = time.time() - connection_start_time
             logger.info(f"Connection ran successfully for {connection_duration:.1f}s")
             # Check if connection ran successfully for a reasonable duration
-            connection_duration = time.time() - connection_start_time
             if connection_duration >= 30:  # Reset backoff if connection lasted at least 30 seconds
                 backoff = BACKOFF_MIN
                 logger.info(f"Reset backoff to {BACKOFF_MIN}s")
