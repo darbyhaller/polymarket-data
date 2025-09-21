@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-import json, time, random, os, signal, threading
+import json, time, random, os, signal, threading, logging
 import websocket  # pip install websocket-client
 from threading import Lock, Event
 from fetch_markets import get_tradeable_asset_mappings
 from parquet_writer import EventTypeParquetWriter
 import hashlib
+
+# Configure logging for journalctl
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
@@ -73,7 +81,7 @@ def update_asset_mappings_from_api():
             with ws_lock:
                 subs_version += 1
     except Exception as e:
-        print(f"Error updating asset mappings: {e}")
+        logger.error(f"Error updating asset mappings: {e}")
     return max(0, new_assets)
 
 def markets_poll_loop():
@@ -101,7 +109,7 @@ def send_subscription(ws):
         if new_ids:
             sub = {"assets_ids": list(new_ids), "type": "market", "initial_dump": True}
             ws.send(json.dumps(sub))
-        print(f"Subscribed to {len(new_ids)} new asset IDs. Total: {len(current_ids)}")
+        logger.info(f"Subscribed to {len(new_ids)} new asset IDs. Total: {len(current_ids)}")
         subscribed_asset_ids = current_ids
 
 def on_open(ws):
@@ -178,14 +186,14 @@ def on_message(ws, msg):
                 writer.write("other", evt)
 
     except Exception as e:
-        print(f"on_message error: {e}")
+        logger.error(f"on_message error: {e}")
 
 def on_error(ws, err):
     # Keep this low-noise; the outer loop will recreate
-    print(f"WebSocket error: {err}")
+    logger.warning(f"WebSocket error: {err}")
 
 def on_close(ws, code, msg):
-    print(f"WebSocket closed: {code} {msg}")
+    logger.info(f"WebSocket closed: {code} {msg}")
     global subscribed_asset_ids
     subscribed_asset_ids.clear()
 
@@ -206,7 +214,7 @@ def subs_refresher(ws):
                         sent_version = v
                 except Exception as e:
                     # Let outer loop handle if this indicates a dead socket
-                    print(f"Resubscribe failed: {e}")
+                    logger.warning(f"Resubscribe failed: {e}")
             else:
                 # Socket is closed; outer loop will reconnect and do a full sub.
                 return
@@ -223,7 +231,7 @@ def watchdog(ws):
             break
         if getattr(ws, "sock", None) and ws.keep_running:
             if time.time() - last_message_time > STALL_TIMEOUT:
-                print(f"No data for {STALL_TIMEOUT}s — forcing reconnect")
+                logger.warning(f"No data for {STALL_TIMEOUT}s — forcing reconnect")
                 try:
                     ws.close()  # triggers exit from run_forever
                 except:
@@ -231,12 +239,12 @@ def watchdog(ws):
                 return
 
 def handle_signal(signum, frame):
-    print(f"Signal {signum}: stopping")
+    logger.info(f"Signal {signum}: stopping")
     should_stop.set()
     writer.close()
     # Force exit if signal handler is called multiple times
     if hasattr(handle_signal, '_called'):
-        print("Force exit")
+        logger.warning("Force exit")
         os._exit(1)
     handle_signal._called = True
 
@@ -261,7 +269,7 @@ def run_websocket_with_timeout(ws):
         )
     except Exception as e:
         if not should_stop.is_set():
-            print(f"WebSocket run_forever exception: {e}")
+            logger.error(f"WebSocket run_forever exception: {e}")
 
 def main():
     signal.signal(signal.SIGINT, handle_signal)
@@ -278,14 +286,14 @@ def main():
     while not should_stop.is_set():
         connection_start_time = time.time()
         try:
-            print("Creating new WebSocket connection...")
+            logger.info("Creating new WebSocket connection...")
             ws = create_websocket()
 
             # Start a watchdog for silent sockets
             watchdog_thread = threading.Thread(target=watchdog, args=(ws,), daemon=True)
             watchdog_thread.start()
 
-            print("Attempting WebSocket connection...")
+            logger.info("Attempting WebSocket connection...")
             # Run websocket in a separate thread so we can interrupt it
             ws_thread = threading.Thread(target=run_websocket_with_timeout, args=(ws,), daemon=True)
             ws_thread.start()
@@ -302,23 +310,24 @@ def main():
                     pass
                 break
             
+            logger.info(f"Connection ran successfully for {connection_duration:.1f}s")
             # Check if connection ran successfully for a reasonable duration
             connection_duration = time.time() - connection_start_time
             if connection_duration >= 30:  # Reset backoff if connection lasted at least 30 seconds
                 backoff = BACKOFF_MIN
-                print(f"Connection ran successfully for {connection_duration:.1f}s - reset backoff to {BACKOFF_MIN}s")
+                logger.info(f"Reset backoff to {BACKOFF_MIN}s")
             
             # If we get here, the socket closed. Backoff and retry.
-            print("Socket ended; backing off before reconnect...")
+            logger.info("Socket ended; backing off before reconnect...")
         except Exception as e:
             if should_stop.is_set():
                 break
-            print(f"WebSocket exception: {e}")
+            logger.error(f"WebSocket exception: {e}")
 
         # Jittered exponential backoff
         sleep_for = backoff + random.uniform(0, 0.5 * backoff)
         sleep_for = min(sleep_for, BACKOFF_MAX)
-        print(f"Reconnecting in {sleep_for:.1f}s...")
+        logger.info(f"Reconnecting in {sleep_for:.1f}s...")
         if should_stop.wait(sleep_for):
             break
         backoff = min(backoff * 2, BACKOFF_MAX)
@@ -330,7 +339,7 @@ def main():
         except:
             pass
 
-    print("WebSocket loop exited")
+    logger.info("WebSocket loop exited")
     writer.close()
 
 if __name__ == "__main__":
