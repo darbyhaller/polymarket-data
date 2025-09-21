@@ -37,11 +37,13 @@ class EventTypeParquetWriter:
         os.makedirs(self.root, exist_ok=True)
         
         base_fields = [
-            pa.field("recv_ts_ms", pa.int64()),
             pa.field("timestamp", pa.int64()),
+            pa.field("delay", pa.int32()),
             pa.field("asset_hash", pa.int64()),
-            pa.field("price", pa.float32()),
             pa.field("size", pa.float32()),
+            pa.field("price", pa.int32()),
+            pa.field("best_bid", pa.int32()),
+            pa.field("best_ask", pa.int32()),
         ]
 
         self.schemas = {}
@@ -64,7 +66,7 @@ class EventTypeParquetWriter:
             use_dictionary=False,
             write_statistics=True,
             data_page_version="2.0",
-            use_byte_stream_split=["price","size","fee_rate_bps"],
+            use_byte_stream_split=["price","size","fee_rate_bps", "best_bid", "best_ask"],
         )
         self.rows_written[file_key] = 0
         # Store final path separately for atomic rename on close
@@ -156,7 +158,7 @@ class EventTypeParquetWriter:
         hourly_groups = defaultdict(list)
         for event in events:
             # Use recv_ts_ms for partitioning
-            recv_ts_ms = event["recv_ts_ms"]
+            recv_ts_ms = event["timestamp"] + event["delay"]
             dt = datetime.fromtimestamp(recv_ts_ms / 1000, timezone.utc)
             hour_key = dt.replace(minute=0, second=0, microsecond=0)
             hourly_groups[hour_key].append(event)

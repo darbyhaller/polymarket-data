@@ -5,12 +5,20 @@ from threading import Lock, Event
 from fetch_markets import get_tradeable_asset_mappings
 from parquet_writer import EventTypeParquetWriter
 import hashlib
+import logging
+
+logging.basicConfig(
+    level=logging.ERROR,
+    format="%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s"
+)
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
+SUB_BATCH = int(os.getenv("SUB_BATCH", "1000"))
+SUB_PAUSE_SEC = float(os.getenv("SUB_PAUSE_SEC", ".1"))
 MARKETS_UPDATE_INTERVAL = 10
-PING_INTERVAL = 30
-PING_TIMEOUT = 10
+PING_INTERVAL = 120
+PING_TIMEOUT = 60
 FSYNC_EVERY_SEC = 5.0
 
 # If we stop seeing traffic for this long, force-close and reconnect.
@@ -96,13 +104,25 @@ def send_subscription(ws):
     global subscribed_asset_ids
     with data_lock:
         current_ids = set(allowed_asset_ids)
-        new_ids = current_ids - subscribed_asset_ids
+        new_ids = list(current_ids - subscribed_asset_ids)
 
-        if new_ids:
-            sub = {"assets_ids": list(new_ids), "type": "market", "initial_dump": True}
-            ws.send(json.dumps(sub))
-        print(f"Subscribed to {len(new_ids)} new asset IDs. Total: {len(current_ids)}")
+    if not new_ids:
+        logging.info("No new ids to subscribe")
+        return
+
+    for i in range(0, len(new_ids), SUB_BATCH):
+        chunk = new_ids[i:i+SUB_BATCH]
+        payload = {"assets_ids": chunk, "type": "market", "initial_dump": True}
+        raw = json.dumps(payload)
+        logging.debug("sub batch %d..%d: ids=%d bytes=%d",
+                      i, i+len(chunk)-1, len(chunk), len(raw))
+        ws.send(raw)
+        time.sleep(SUB_PAUSE_SEC)
+
+    with data_lock:
         subscribed_asset_ids = current_ids
+    logging.info("Subscribed %d new ids in %d batches (total now %d)",
+                 len(new_ids), (len(new_ids)+SUB_BATCH-1)//SUB_BATCH, len(current_ids))
 
 def on_open(ws):
     global sent_version, last_message_time, backoff
@@ -129,41 +149,55 @@ def on_message(ws, msg):
 
         payload = json.loads(s)
 
+        if not isinstance(payload, list):  # I added this, not AI. Sometimes the event is sent as a list, sometimes a single item :(
+            payload = [payload]
         for d in payload:
             et = d["event_type"]
-            h = int.from_bytes(hashlib.blake2s(d["asset_id"].encode("utf-8"), digest_size=8).digest(), "big", signed=True)
 
             common = {
-                "recv_ts_ms": recv_ms,
-                "asset_hash": h,
                 "timestamp": int(d["timestamp"]),
+                "delay": recv_ms - int(d["timestamp"]),
             }
 
-            def emit_price_event(price: str, size: str, side: str):
+            def intify(p_str):
+                return int(float(p_str)*10_000)
+
+            def emit_price_event(asset_id: str, price: str, size: str, side: str, best_bid: str, best_ask: str):
+                h = int.from_bytes(hashlib.blake2s(asset_id.encode("utf-8"), digest_size=8).digest(), "big", signed=True)
                 evt = dict(common)
                 evt.update({
-                    "price": float(price),
+                    "asset_hash": h,
+                    "price": intify(price),
                     "size": float(size),
+                    "best_bid": intify(best_bid),
+                    "best_ask": intify(best_ask),
                 })
                 writer.write("order_update_"+side, evt)
 
             if et == "book":
+                bids = d["bids"]
+                asks = d["asks"]
+                # compute top-of-book; if one side is empty, use NaN (or -1.0 if you prefer)
+                best_bid = str(max((float(lv["price"]) for lv in bids), default=0.0))
+                best_ask = str(min((float(lv["price"]) for lv in asks), default=1.0))
                 # Flatten bids (BUY) and asks (SELL)
                 for lvl in d["bids"]:
-                    emit_price_event(lvl.get("price"), lvl.get("size"), "BUY")
+                    emit_price_event(d["asset_id"], lvl["price"], lvl["size"], "BUY", best_bid, best_ask)
                 for lvl in d["asks"]:
-                    emit_price_event(lvl.get("price"), lvl.get("size"), "SELL")
+                    emit_price_event(d["asset_id"], lvl["price"], lvl["size"], "SELL", best_bid, best_ask)
 
             elif et == "price_change":
                 # Flatten each change as a "price" event
-                for ch in d["changes"]:
-                    emit_price_event(ch.get("price"), ch.get("size"), ch.get("side"))
+                for ch in d["price_changes"]:
+                    emit_price_event(ch["asset_id"], ch["price"], ch["size"], ch["side"], ch["best_bid"], ch["best_ask"])
 
             elif et == "last_trade_price":
                 evt = dict(common)
+                h = int.from_bytes(hashlib.blake2s(d["asset_id"].encode("utf-8"), digest_size=8).digest(), "big", signed=True)
                 evt.update({
-                    "price": float(d.get("price")),
-                    "size": float(d.get("size")),
+                    "asset_hash": h,
+                    "price": intify(d["price"]),
+                    "size": float(d["size"]),
                     "fee_rate_bps": float(d.get("fee_rate_bps")),
                 })
                 writer.write("last_trade_price_"+d.get("side"), evt)
@@ -176,13 +210,15 @@ def on_message(ws, msg):
                         evt[k] = v
                 evt['event_type'] = et
                 writer.write("other", evt)
-
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        print(f"on_message error: {e}")
+        print(e)
+        logging.error("on_message failed", exc_info=True)
 
 def on_error(ws, err):
     # Keep this low-noise; the outer loop will recreate
-    print(f"WebSocket error: {err}")
+    logging.error("WebSocket error: %r (%s)", err, type(err).__name__, exc_info=True)
 
 def on_close(ws, code, msg):
     print(f"WebSocket closed: {code} {msg}")
@@ -257,7 +293,7 @@ def run_websocket_with_timeout(ws):
             ping_timeout=PING_TIMEOUT,
             ping_payload="ping",
             skip_utf8_validation=True,
-            suppress_origin=True,
+            suppress_origin=False,
         )
     except Exception as e:
         if not should_stop.is_set():
@@ -332,6 +368,5 @@ def main():
 
     print("WebSocket loop exited")
     writer.close()
-
 if __name__ == "__main__":
     main()

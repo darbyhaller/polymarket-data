@@ -136,14 +136,9 @@ def get_tradeable_markets():
     tradeable = {}
     
     for condition_id, market in markets_data.items():
-        is_active = market.get("active", False)
-        is_not_closed = not market.get("closed", True)
-        is_not_archived = not market.get("archived", True)
-        is_accepting_orders = market.get("accepting_orders", False)
-        
-        if is_active and is_not_closed and is_not_archived and is_accepting_orders:
+        if market["enable_order_book"]:
             tradeable[condition_id] = market
-    
+
     return tradeable
 
 def extract_asset_mappings():
