@@ -37,7 +37,9 @@ def append_cache(new_items, cursor):
         for line in inp:
             out.write(line)
     os.remove(tmp)
-    save_cursor(cursor)
+    # never persist LTE= (tail) cursors
+    if cursor and cursor != "LTE=":
+        save_cursor(cursor)
 
 def load_cache_streaming():
     """Load cache by streaming the file (no giant dict reconstruct every 10s)."""
@@ -91,6 +93,7 @@ def update_markets_cache_incremental():
     new_items = []
     
     for cursor_used, data, next_cursor in fetch_markets_from_cursor(cursor):
+        print(next_cursor)
         for m in data:
             cid = m.get("condition_id")
             if cid and cid not in markets:
@@ -108,7 +111,7 @@ def update_markets_cache_incremental():
         print(f"Update complete: +{len(new_items)} new")
     else:
         # Just update cursor if it advanced (rare); otherwise do nothing
-        if final_cursor != cursor:
+        if final_cursor and final_cursor != "LTE=" and final_cursor != cursor:
             save_cursor(final_cursor)
     return markets
 
