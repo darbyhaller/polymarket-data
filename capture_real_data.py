@@ -14,8 +14,6 @@ logging.basicConfig(
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
-SUB_BATCH = int(os.getenv("SUB_BATCH", "100000"))
-SUB_PAUSE_SEC = float(os.getenv("SUB_PAUSE_SEC", ".1"))
 MARKETS_UPDATE_INTERVAL = 10
 PING_INTERVAL = 30
 PING_TIMEOUT = 10
@@ -109,19 +107,13 @@ def send_subscription(ws):
         logging.info("No new ids to subscribe")
         return
 
-    for i in range(0, len(new_ids), SUB_BATCH):
-        chunk = new_ids[i:i+SUB_BATCH]
-        payload = {"assets_ids": chunk, "type": "market", "initial_dump": True}
-        raw = json.dumps(payload)
-        logging.debug("sub batch %d..%d: ids=%d bytes=%d",
-                      i, i+len(chunk)-1, len(chunk), len(raw))
-        ws.send(raw)
-        time.sleep(SUB_PAUSE_SEC)
+    payload = {"assets_ids": new_ids, "type": "market", "initial_dump": True}
+    raw = json.dumps(payload)
+    ws.send(raw)
 
     with data_lock:
         subscribed_asset_ids = current_ids
-    logging.info("Subscribed %d new ids in %d batches (total now %d)",
-                 len(new_ids), (len(new_ids)+SUB_BATCH-1)//SUB_BATCH, len(current_ids))
+    logging.info("Subscribed %d new ids (total now %d)", len(new_ids), len(current_ids))
 
 def on_open(ws):
     global sent_version, last_message_time, backoff
