@@ -111,7 +111,7 @@ def send_subscription(ws):
 
     for i in range(0, len(new_ids), SUB_BATCH):
         chunk = new_ids[i:i+SUB_BATCH]
-        payload = {"assets_ids": chunk, "type": "market", "initial_dump": True}
+        payload = {"assets_ids": chunk, "type": "market", "initial_dump": False}
         raw = json.dumps(payload)
         logging.debug("sub batch %d..%d: ids=%d bytes=%d",
                       i, i+len(chunk)-1, len(chunk), len(raw))
@@ -174,6 +174,7 @@ def on_message(ws, msg):
                 writer.write("order_update_"+side, evt)
 
             if et == "book":
+                pass
                 bids = d["bids"]
                 asks = d["asks"]
                 # compute top-of-book; if one side is empty, use NaN (or -1.0 if you prefer)
