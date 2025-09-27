@@ -111,7 +111,7 @@ def send_subscription(ws):
 
     for i in range(0, len(new_ids), SUB_BATCH):
         chunk = new_ids[i:i+SUB_BATCH]
-        payload = {"assets_ids": chunk, "type": "market", "initial_dump": False}
+        payload = {"assets_ids": chunk, "type": "market", "initial_dump": True}
         raw = json.dumps(payload)
         logging.debug("sub batch %d..%d: ids=%d bytes=%d",
                       i, i+len(chunk)-1, len(chunk), len(raw))
@@ -161,35 +161,24 @@ def on_message(ws, msg):
             def intify(p_str):
                 return int(float(p_str)*10_000)
 
-            def emit_price_event(asset_id: str, price: str, size: str, side: str, best_bid: str, best_ask: str):
-                h = int.from_bytes(hashlib.blake2s(asset_id.encode("utf-8"), digest_size=8).digest(), "big", signed=True)
-                evt = dict(common)
-                evt.update({
-                    "asset_hash": h,
-                    "price": intify(price),
-                    "size": float(size),
-                    "best_bid": intify(best_bid),
-                    "best_ask": intify(best_ask),
-                })
-                writer.write("order_update_"+side, evt)
-
             if et == "book":
-                pass
-                bids = d["bids"]
-                asks = d["asks"]
-                # compute top-of-book; if one side is empty, use NaN (or -1.0 if you prefer)
-                best_bid = str(max((float(lv["price"]) for lv in bids), default=0.0))
-                best_ask = str(min((float(lv["price"]) for lv in asks), default=1.0))
-                # Flatten bids (BUY) and asks (SELL)
-                for lvl in d["bids"]:
-                    emit_price_event(d["asset_id"], lvl["price"], lvl["size"], "BUY", best_bid, best_ask)
-                for lvl in d["asks"]:
-                    emit_price_event(d["asset_id"], lvl["price"], lvl["size"], "SELL", best_bid, best_ask)
+                h = int.from_bytes(hashlib.blake2s(d["asset_id"].encode("utf-8"), digest_size=8).digest(), "big", signed=True)
+                common.update({"asset_hash": h, "book": str(d)})
+                writer.write("book", common)
 
             elif et == "price_change":
                 # Flatten each change as a "price" event
                 for ch in d["price_changes"]:
-                    emit_price_event(ch["asset_id"], ch["price"], ch["size"], ch["side"], ch["best_bid"], ch["best_ask"])
+                    h = int.from_bytes(hashlib.blake2s(ch["asset_id"].encode("utf-8"), digest_size=8).digest(), "big", signed=True)
+                    evt = dict(common)
+                    evt.update({
+                        "asset_hash": h,
+                        "price": intify(ch["price"]),
+                        "size": float(ch["size"]),
+                        "best_bid": intify(ch["best_bid"]),
+                        "best_ask": intify(ch["best_ask"]),
+                    })
+                    writer.write("price_change_"+ch["side"], evt)
 
             elif et == "last_trade_price":
                 evt = dict(common)

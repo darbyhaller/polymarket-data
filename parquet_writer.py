@@ -42,13 +42,12 @@ class EventTypeParquetWriter:
             pa.field("asset_hash", pa.int64()),
             pa.field("size", pa.float32()),
             pa.field("price", pa.int32()),
-            pa.field("best_bid", pa.int32()),
-            pa.field("best_ask", pa.int32()),
         ]
 
         self.schemas = {}
         for side in "BUY", "SELL":
-            self.schemas["order_update_"+side] = pa.schema(base_fields)
+            self.schemas["price_change_"+side] = pa.schema(base_fields + [pa.field("best_bid", pa.int32()), pa.field("best_ask", pa.int32())])
+            self.schemas["book"] = pa.schema([pa.field("book", pa.string())])
             self.schemas["last_trade_price_"+side] = pa.schema(base_fields + [pa.field("fee_rate_bps", pa.float32())])
 
     
@@ -139,7 +138,7 @@ class EventTypeParquetWriter:
         y, m, d, h = dt.strftime("%Y %m %d %H").split()
         return os.path.join(
             self.root,
-            f"event_type={event_type}",
+            f"{event_type}",
             f"year={y}",
             f"month={m}",
             f"day={d}",

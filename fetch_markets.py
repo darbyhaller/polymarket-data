@@ -1,49 +1,63 @@
 #!/usr/bin/env python3
 """
-Fetch and cache Polymarket simplified markets with cursor-based pagination.
-Saves results to markets_cache.json with cursor state for incremental updates.
+Append-only Polymarket markets cache with API compatibility.
+
+Public API preserved:
+- get_tradeable_asset_mappings(force_update: bool = False) -> dict
+- get_tradeable_markets() -> dict
+- extract_asset_mappings() -> dict
+- update_markets_cache(full_refresh: bool = False) -> dict
+- load_cache_streaming() -> (dict, str)   # compatibility shim (now O(1), no re-read)
+
+Behavior:
+- Load JSONL once at process start (or first call) into memory.
+- On incremental updates, append only *new* markets to JSONL and update in-memory dict.
+- Never re-parse the JSONL again while the process runs.
 """
 
-from orjson import dumps, loads
-import requests
+from __future__ import annotations
 import os
+import threading
+from typing import Dict, Tuple
+import requests
+from orjson import loads, dumps
 
 CLOB_BASE = "https://clob.polymarket.com"
 CACHE_FILE = "markets_cache.jsonl"
 CURSOR_FILE = "markets_cursor.txt"
 
-def load_cursor():
+# ---- In-memory state (lazy-loaded) ----
+_markets: Dict[str, dict] | None = None
+_cursor: str | None = None
+_lock = threading.RLock()  # protect _markets/_cursor during updates
+
+
+# ----------------- Helpers -----------------
+
+def _read_cursor() -> str:
     try:
         with open(CURSOR_FILE, "r") as f:
             return f.read().strip()
     except FileNotFoundError:
         return ""
 
-def save_cursor(cursor: str):
-    tmp = CURSOR_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        f.write(cursor)
-    os.replace(tmp, CURSOR_FILE)
 
-def append_cache(new_items, cursor):
-    """Append new markets to cache file atomically."""
-    # new_items: iterable[(condition_id, market_dict)]
-    tmp = CACHE_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        for cid, market in new_items:
-            f.write(dumps({"_type": "market", "condition_id": cid, **market}).decode() + "\n")
-    # append atomically
-    with open(CACHE_FILE, "a") as out, open(tmp, "r") as inp:
-        for line in inp:
-            out.write(line)
-    os.remove(tmp)
-    # never persist LTE= (tail) cursors
-    if cursor and cursor != "LTE=":
-        save_cursor(cursor)
+def _write_cursor(c: str) -> None:
+    # Persist only meaningful cursors
+    if c and c != "LTE=":
+        tmp = CURSOR_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(c)
+        os.replace(tmp, CURSOR_FILE)
 
-def load_cache_streaming():
-    """Load cache by streaming the file (no giant dict reconstruct every 10s)."""
-    markets = {}
+
+def _load_cache_once() -> None:
+    """Load JSONL cache *once* into memory; idempotent."""
+    global _markets, _cursor
+    if _markets is not None:
+        return
+
+    markets: Dict[str, dict] = {}
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, "r") as f:
             for line in f:
@@ -55,186 +69,190 @@ def load_cache_streaming():
                     rec.pop("_type", None)
                     if cid:
                         markets[cid] = rec
-    return markets, load_cursor()
 
-def fetch_markets_from_cursor(start_cursor=""):
-    """Fetch markets starting from a specific cursor."""
-    cursor = start_cursor
+    _markets = markets
+    _cursor = _read_cursor()
+
+
+def _append_new_markets_to_disk(new_items: list[tuple[str, dict]], cursor_after: str) -> None:
+    """Append new markets to JSONL and persist cursor; update in-memory dict too."""
+    global _markets, _cursor
+    if not new_items:
+        # Still persist cursor if it advanced
+        if cursor_after and cursor_after != "LTE=":
+            _cursor = cursor_after
+            _write_cursor(_cursor)
+        return
+
+    with open(CACHE_FILE, "a") as out:
+        for cid, market in new_items:
+            out.write(dumps({"_type": "market", "condition_id": cid, **market}).decode() + "\n")
+            _markets[cid] = market  # update in-memory
+
+    if cursor_after and cursor_after != "LTE=":
+        _cursor = cursor_after
+        _write_cursor(_cursor)
+
+
+def _fetch_markets_from_cursor(start_cursor: str):
+    """Generator yielding (cursor_used, data_page, next_cursor)."""
+    cursor = start_cursor or ""
     while True:
-        url = f"{CLOB_BASE}/markets"
-        params = {"next_cursor": cursor} if cursor else {}
         try:
-            r = requests.get(url, params=params, timeout=20)
+            r = requests.get(f"{CLOB_BASE}/markets",
+                             params={"next_cursor": cursor} if cursor else {},
+                             timeout=20)
             r.raise_for_status()
             page = r.json()
-            data = page.get("data", [])
+            data = page.get("data", []) or []
             if not data:
-                # No data at this cursor; we're done.
-                # We won't rely on a 'return value' from the generator.
+                break
+            next_cursor = page.get("next_cursor") or "LTE="
+            yield cursor, data, next_cursor
+            if next_cursor == "LTE=":
+                break
+            cursor = next_cursor
+        except Exception as e:
+            print(f"[fetch_markets] Error: {e}")
+            break
+
+
+# ----------------- Public API -----------------
+
+def update_markets_cache_incremental() -> Dict[str, dict]:
+    """Fetch new markets after the current cursor and append only *new* IDs."""
+    global _markets, _cursor
+    with _lock:
+        _load_cache_once()
+        assert _markets is not None
+        start_cursor = _cursor or ""
+        new_items: list[tuple[str, dict]] = []
+        final_cursor = start_cursor
+
+        for cursor_used, data, next_cursor in _fetch_markets_from_cursor(start_cursor):
+            for m in data:
+                cid = m.get("condition_id")
+                if cid and cid not in _markets:
+                    new_items.append((cid, m))
+            if next_cursor != "LTE=":
+                final_cursor = next_cursor
+            else:
                 break
 
-            next_cursor = page.get("next_cursor") or "LTE="
-
-            # IMPORTANT: yield the cursor we USED for this fetch, plus the data and next_cursor
-            yield cursor, data, next_cursor
-
-            if next_cursor == "LTE=":
-                break  # reached the end
-            cursor = next_cursor
-
-        except Exception as e:
-            print(f"Error fetching markets: {e}")
-            break
-
-def update_markets_cache_incremental():
-    """Update markets cache incrementally, only appending new records."""
-    markets, cursor = load_cache_streaming()  # load once at process start
-    final_cursor = cursor
-    new_items = []
-    
-    for cursor_used, data, next_cursor in fetch_markets_from_cursor(cursor):
-        print(next_cursor)
-        for m in data:
-            cid = m.get("condition_id")
-            if cid and cid not in markets:
-                markets[cid] = m
-                new_items.append((cid, m))
-        if next_cursor != "LTE=":
-            final_cursor = next_cursor
+        _append_new_markets_to_disk(new_items, final_cursor)
+        if new_items:
+            print(f"[markets] +{len(new_items)} new (total={len(_markets)})")
         else:
-            # At the end, sleep longer before next poll to avoid useless work
-            print("Reached end of markets (LTE=), backing off...")
-            break
-    
-    if new_items:
-        append_cache(new_items, final_cursor)
-        print(f"Update complete: +{len(new_items)} new")
-    else:
-        # Just update cursor if it advanced (rare); otherwise do nothing
-        if final_cursor and final_cursor != "LTE=" and final_cursor != cursor:
-            save_cursor(final_cursor)
-    return markets
+            print("[markets] No new markets.")
+        return _markets
 
-def update_markets_cache(full_refresh=False):
-    """Legacy wrapper for backward compatibility."""
-    if full_refresh:
-        # For full refresh, clear cache files and start fresh
-        if os.path.exists(CACHE_FILE):
-            os.remove(CACHE_FILE)
-        if os.path.exists(CURSOR_FILE):
-            os.remove(CURSOR_FILE)
-        print("Performing full refresh...")
-    
-    return update_markets_cache_incremental()
 
-def get_tradeable_markets():
-    """Get markets that meet trading criteria: active, not closed, not archived, accepting orders."""
-    markets_data, _ = load_cache_streaming()
-    tradeable = {}
-    
-    for condition_id, market in markets_data.items():
-        if market["enable_order_book"]:
-            tradeable[condition_id] = market
+def update_markets_cache(full_refresh: bool = False) -> Dict[str, dict]:
+    """Compatibility wrapper with old signature."""
+    global _markets, _cursor
+    with _lock:
+        if full_refresh:
+            # Clear on-disk cache & cursor, in-memory too; then refill
+            if os.path.exists(CACHE_FILE):
+                os.remove(CACHE_FILE)
+            if os.path.exists(CURSOR_FILE):
+                os.remove(CURSOR_FILE)
+            _markets = {}
+            _cursor = ""
+        # Always do incremental fetch (cheap) to preserve old behavior
+        return update_markets_cache_incremental()
 
-    return tradeable
 
-def extract_asset_mappings():
-    """Extract asset ID mappings for WebSocket subscription from tradeable markets only."""
-    # Get only tradeable markets that meet all conditions
-    tradeable_markets = get_tradeable_markets()
-    
+def load_cache_streaming() -> Tuple[Dict[str, dict], str]:
+    """
+    Compatibility shim: previously re-parsed the file.
+    Now returns the in-memory dict and cursor (O(1), no disk read).
+    """
+    with _lock:
+        _load_cache_once()
+        return _markets, (_cursor or "")
+
+
+def get_tradeable_markets() -> Dict[str, dict]:
+    with _lock:
+        _load_cache_once()
+        assert _markets is not None
+        # No disk I/O; in-memory filter
+        return {cid: m for cid, m in _markets.items() if m.get("enable_order_book")}
+
+
+def extract_asset_mappings() -> dict:
+    tradeable = get_tradeable_markets()
+
     allowed_asset_ids = set()
-    asset_to_market = {}
-    asset_outcome = {}
-    market_to_first_asset = {}
-    
-    for condition_id, market in tradeable_markets.items():
-        tokens = market.get("tokens", [])
-        if len(tokens) < 1:
+    asset_to_market: Dict[str, str] = {}
+    asset_outcome: Dict[str, str] = {}
+    market_to_first_asset: Dict[str, str] = {}
+
+    for condition_id, market in tradeable.items():
+        tokens = market.get("tokens", []) or []
+        if not tokens:
             continue
-            
-        # Use condition_id as market title
+
         title = condition_id
         first_token_found = False
-        
-        # Process all tokens in the market
+
         for token in tokens:
             token_id = (
-                token.get("token_id") or
-                token.get("clob_token_id") or
-                token.get("clobTokenId") or
-                token.get("id")
+                token.get("token_id")
+                or token.get("clob_token_id")
+                or token.get("clobTokenId")
+                or token.get("id")
             )
-            
             if not token_id:
                 continue
-                
+
             outcome = (token.get("outcome") or token.get("name") or "").title()
-            
-            # Add to allowed assets
+
             allowed_asset_ids.add(token_id)
             asset_to_market[token_id] = title[:80]
             if outcome:
                 asset_outcome[token_id] = outcome
-                
-            # Track first valid token for this market
+
             if not first_token_found:
                 market_to_first_asset[title] = token_id
                 first_token_found = True
-    
+
     return {
-        'allowed_asset_ids': sorted(list(allowed_asset_ids)),
-        'asset_to_market': asset_to_market,
-        'asset_outcome': asset_outcome,
-        'market_to_first_asset': market_to_first_asset
+        "allowed_asset_ids": sorted(allowed_asset_ids),
+        "asset_to_market": asset_to_market,
+        "asset_outcome": asset_outcome,
+        "market_to_first_asset": market_to_first_asset,
     }
 
-def get_tradeable_asset_mappings(force_update=False):
+
+def get_tradeable_asset_mappings(force_update: bool = False) -> dict:
     """
-    Get asset mappings for tradeable markets, updating cache if needed.
-    
-    Args:
-        force_update (bool): If True, force a full cache refresh
-        
-    Returns:
-        dict: Asset mappings with keys:
-            - allowed_asset_ids: list of asset IDs to subscribe to
-            - asset_to_market: mapping from asset ID to market title
-            - asset_outcome: mapping from asset ID to outcome name
-            - market_to_first_asset: mapping from market to first asset ID
-            - total_markets: total number of markets in cache
-            - tradeable_markets: number of tradeable markets
+    Public entry-point used by capture_real_data.py.
+    Preserves old semantics: each call performs a cheap incremental update,
+    then returns the mapping built from in-memory state.
     """
-    # Update cache if needed
-    if force_update:
-        markets = update_markets_cache(full_refresh=True)
-    else:
-        # Check if cache exists and is recent (less than 5 minutes old)
-        if os.path.exists(CACHE_FILE):
-            markets = update_markets_cache(full_refresh=False)
+    with _lock:
+        _load_cache_once()
+        if force_update:
+            update_markets_cache(full_refresh=True)
         else:
-            print("No cache found, performing full refresh...")
-            markets = update_markets_cache(full_refresh=True)
-    
-    # Get tradeable markets and extract mappings
-    tradeable = get_tradeable_markets()
-    mappings = extract_asset_mappings()
-    
-    # Add summary information
-    mappings['total_markets'] = len(markets)
-    mappings['tradeable_markets'] = len(tradeable)
-    
-    return mappings
+            # cheap incremental pass; if no new data, it's basically a no-op
+            update_markets_cache_incremental()
+
+        tradeable = get_tradeable_markets()
+        mappings = extract_asset_mappings()
+        mappings["total_markets"] = len(_markets or {})
+        mappings["tradeable_markets"] = len(tradeable)
+        return mappings
+
+
+# ------------- CLI (optional) -------------
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "--full":
-        mappings = get_tradeable_asset_mappings(force_update=True)
-    else:
-        mappings = get_tradeable_asset_mappings(force_update=False)
-    
-    print(f"\nSummary:")
-    print(f"Total markets: {mappings['total_markets']}")
-    print(f"Tradeable markets: {mappings['tradeable_markets']}")
-    print(f"Asset IDs for subscription: {len(mappings['allowed_asset_ids'])}")
+    # Warm the cache and do one incremental update (matches old behavior)
+    update_markets_cache(full_refresh=False)
+    m = get_tradeable_asset_mappings(force_update=False)
+    print(f"Total markets: {m['total_markets']}")
+    print(f"Tradeable markets: {m['tradeable_markets']}")
+    print(f"Asset IDs: {len(m['allowed_asset_ids'])}")
