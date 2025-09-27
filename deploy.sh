@@ -35,7 +35,7 @@ ensure_sa_and_iam(){
 
 ensure_disk(){
   say "Ensuring disk $DATA_DISK_NAME ${DATA_DISK_SIZE_GB}GB"
-  gcloud compute disks describe "$DATA_DISK_NAME" --zone "$ZONE" >/dev/null 2>&1 || gcloud compute disks create "$DATA_DISK_NAME" --size="${DATA_DISK_SIZE_GB}GB" --type=pd-standard --zone "$ZONE"
+  gcloud compute disks describe "$DATA_DISK_NAME" --zone "$ZONE" >/dev/null 2>&1 || gcloud compute disks create "$DATA_DISK_NAME" --size="${DATA_DISK_SIZE_GB}GB" --type=pd-balanced --zone "$ZONE"
 }
 
 ensure_vm(){
