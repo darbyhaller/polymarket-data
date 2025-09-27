@@ -14,7 +14,7 @@ logging.basicConfig(
 
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
-SUB_BATCH = int(os.getenv("SUB_BATCH", "1000"))
+SUB_BATCH = int(os.getenv("SUB_BATCH", "100000"))
 SUB_PAUSE_SEC = float(os.getenv("SUB_PAUSE_SEC", ".1"))
 MARKETS_UPDATE_INTERVAL = 10
 PING_INTERVAL = 30
