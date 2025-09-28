@@ -138,3 +138,5 @@ for r in $(echo "$REGIONS" | tr ',' ' '); do
   echo "  Region $r -> gs://$b"
   echo "  $(gcloud storage ls -r gs://$b/parquets/event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet 2>/dev/null | tail -n1)"
 done
+echo "sudo journalctl -fu google-startup-scripts.service"
+echo "sudo journalctl -fu polymarket"
