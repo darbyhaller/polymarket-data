@@ -75,10 +75,8 @@ ensure_vm(){
     printf "SHARD_PATH=shard=%02d\n" "$shard_id"
   } >> "$tmp_env"
 
-  META=("polymarket-env=$(python3 - <<'PY' < "$tmp_env"
-import sys,base64; print(base64.b64encode(sys.stdin.read().encode()).decode())
-PY
-)")
+  META=("polymarket-env=$(python3 -c 'import sys,base64; print(base64.b64encode(open(sys.argv[1],"rb").read()).decode())' "$tmp_env")")
+
   rm -f "$tmp_env"
 
   MF=(); [[ -n "${MACHINE_TYPE:-}" ]] && MF+=(--machine-type="$MACHINE_TYPE") || MF+=(--custom-cpu="$CUSTOM_CPU" --custom-memory="$CUSTOM_MEMORY")
