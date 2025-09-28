@@ -65,11 +65,9 @@ cat >/etc/google-cloud-ops-agent/config.yaml <<'YAML'
 logging:
   receivers:
     polymarket_journald:
-      type: journald
-      include_units: ["polymarket.service"]
+      type: systemd_journald
     startup_journald:
-      type: journald
-      include_units: ["google-startup-scripts.service"]
+      type: systemd_journald
   service:
     pipelines:
       polymarket:

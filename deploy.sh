@@ -25,6 +25,14 @@ say(){ echo -e "\n==> $*"; }
 need(){ command -v "$1" >/dev/null || { echo "Missing: $1"; exit 1; }; }
 ensure_project(){ gcloud config set project "$PROJECT" >/dev/null; }
 
+ensure_sa_project_roles(){
+  say "Ensuring SA $SA_EMAIL exists and has Monitoring/Logging writer roles on project $PROJECT"
+  gcloud iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1 || gcloud iam service-accounts create "$SA_NAME" --display-name="Polymarket VM SA"
+  # These roles are required for Ops Agent to write metrics and logs
+  gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA_EMAIL" --role="roles/monitoring.metricWriter" >/dev/null
+  gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$SA_EMAIL" --role="roles/logging.logWriter" >/dev/null
+}
+
 split_csv(){ local s="$1"; IFS=',' read -r -a __arr <<<"$s"; printf '%s\n' "${__arr[@]}"; }
 
 ensure_bucket(){
