@@ -7,16 +7,16 @@ from plotly.subplots import make_subplots
 import plotly.io as pio
 
 # ========= Config (tweak these) =========
-ROOT        = "tp/parquets"            # root folder containing event_type=.../year=.../...
-EVENT_TYPE  = "order_update_SELL"   # which event_type directory to read
-DAY_FILTER  = "27"                   # e.g. "26" or "*" to include all days
+ROOT        = "parquets"            # root folder containing event_type=.../year=.../...
+EVENT_TYPE  = "price_change_SELL"   # which event_type directory to read
+DAY_FILTER  = "*"                   # e.g. "26" or "*" to include all days
 HOUR_FILTER = "*"                   # e.g. "07" or "*" to include all hours
 
 TIMESTAMP_COL = "timestamp"         # column containing event time in **milliseconds since epoch**
 USE_RIGHT_EDGE = True               # assign gap to the later event's timestamp (right edge); False uses left edge
 
-RESAMPLE   = "20S"                   # aggregation bucket size ("1T" = 1 minute)
-PCTL       = 0.999                   # percentile for pXX (0.90 = p90)
+RESAMPLE   = "1T"                   # aggregation bucket size ("1T" = 1 minute)
+PCTL       = 0.99999999                   # percentile for pXX (0.90 = p90)
 HTML_OUT   = "per_minute_pctl_gap.html"
 OPEN_BROWSER = True                 # if True, try to open in your default browser
 pio.renderers.default = "browser" if OPEN_BROWSER else "notebook_connected"
@@ -28,7 +28,7 @@ row_re = re.compile(r".*year=(\d+)/month=(\d+)/day=(\d+)/hour=(\d+)/events-\d+\.
 # Collect files
 pattern = os.path.join(
     ROOT,
-    f"event_type={EVENT_TYPE}",
+    f"{EVENT_TYPE}",
     "year=*",
     "month=*",
     f"day={DAY_FILTER}",
