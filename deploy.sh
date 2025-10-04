@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --- Config (export to override) ---
-PROJECT="${PROJECT:-polymarket-470619}"; REGION="${REGION:-us-central1}"; ZONE="${ZONE:-us-central1-a}"
 # Multi-region + replicas
-REGIONS="${REGIONS:-us-central1,us-east1}"           # comma-separated: e.g. "us-central1,us-east1"
-ZONES="${ZONES:-us-central1-f,us-east1-b}"           # optional comma-separated zones aligned with REGIONS; defaults to "<region>-a" if empty
-REPLICAS_PER_REGION="${REPLICAS_PER_REGION:-1}"       # N per region
+# comma-separated: e.g. "us-central1,us-east1"
+# optional comma-separated zones aligned with REGIONS; defaults to "<region>-a" if empty
+# N per region
+# 1 vCPU, 4 GB RAM
+# Per-region buckets will be named: $BUCKET_PREFIX-$region
 
+PROJECT="${PROJECT:-polymarket-470619}"; REGION="${REGION:-us-central1}"; ZONE="${ZONE:-us-central1-a}"
+REGIONS="${REGIONS:-us-central1,us-east1}"
+ZONES="${ZONES:-us-central1-f,us-east1-b}"
+REPLICAS_PER_REGION="${REPLICAS_PER_REGION:-1}"
 VM_NAME_PREFIX="${VM_NAME_PREFIX:-polymarket-vm}"
-MACHINE_TYPE="${MACHINE_TYPE:-t2d-standard-1}"        # 1 vCPU, 4 GB RAM
+MACHINE_TYPE="${MACHINE_TYPE:-t2d-standard-1}"
 VM_SCOPES="${VM_SCOPES:-https://www.googleapis.com/auth/cloud-platform}"
 DATA_DISK_PREFIX="${DATA_DISK_PREFIX:-polymarket-data}" DATA_DISK_SIZE_GB="${DATA_DISK_SIZE_GB:-100}"
-# Per-region buckets will be named: $BUCKET_PREFIX-$region
 BUCKET_PREFIX="${BUCKET_PREFIX:-polymarket-raw-$PROJECT}"
 ARCHIVE_AFTER_DAYS="${ARCHIVE_AFTER_DAYS:-365}"
-
 REPO_URL="${REPO_URL:-https://github.com/darbyhaller/polymarket-data}" REPO_BRANCH="${REPO_BRANCH:-main}"
 APP_DIR="${APP_DIR:-/opt/polymarket}" ENTRYPOINT="${ENTRYPOINT:-capture_real_data.py}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-requirements.txt}" SA_NAME="${SA_NAME:-vm-polymarket}"
