@@ -15,8 +15,8 @@ logging.basicConfig(
 WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CLOB_BASE = "https://clob.polymarket.com"
 MARKETS_UPDATE_INTERVAL = 10
-PING_INTERVAL = 30
-PING_TIMEOUT = 10
+PING_INTERVAL = 6
+PING_TIMEOUT = 3
 
 # If we stop seeing traffic for this long, force-close and reconnect.
 STALL_TIMEOUT = 90
