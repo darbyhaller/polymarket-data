@@ -7,6 +7,9 @@ set -euo pipefail
 # N per region
 # 1 vCPU, 4 GB RAM
 # Per-region buckets will be named: $BUCKET_PREFIX-$region
+# MUST CHANGE IMAGE_FAMILY to be compatible with MACHINE_TYPE (remove/add -arm-64 from end)
+# IMAGE_FAMILY="ubuntu-2204-lts"
+
 
 PROJECT="${PROJECT:-polymarket-470619}"
 REGIONS="${REGIONS:-europe-west4}"
@@ -14,6 +17,7 @@ ZONES="${ZONES:-europe-west4-a}"
 REPLICAS_PER_REGION="${REPLICAS_PER_REGION:-1}"
 VM_NAME_PREFIX="${VM_NAME_PREFIX:-polymarket-vm}"
 MACHINE_TYPE="${MACHINE_TYPE:-c4a-standard-1}"
+IMAGE_FAMILY="ubuntu-2204-lts-arm64"
 VM_SCOPES="${VM_SCOPES:-https://www.googleapis.com/auth/cloud-platform}"
 DATA_DISK_PREFIX="${DATA_DISK_PREFIX:-polymarket-data}" DATA_DISK_SIZE_GB="${DATA_DISK_SIZE_GB:-100}"
 BUCKET_PREFIX="${BUCKET_PREFIX:-polymarket-raw-$PROJECT}"
@@ -95,7 +99,7 @@ ensure_vm(){
   if ! gcloud compute instances describe "$vm_name" --zone "$zone" >/dev/null 2>&1; then
     say "Creating VM $vm_name"
     gcloud compute instances create "$vm_name" --zone "$zone" "${MF[@]}" --service-account "$SA_EMAIL" "${SC[@]}" \
-      --create-disk=auto-delete=yes,boot=yes,image-family=ubuntu-2204-lts,image-project=ubuntu-os-cloud \
+      --create-disk=auto-delete=yes,boot=yes,image-family="${IMAGE_FAMILY}",image-project=ubuntu-os-cloud \
       --disk=name="$data_disk",mode=rw,auto-delete=no \
       --metadata-from-file startup-script=vm/startup.sh \
       --metadata "${META[@]}"
@@ -140,10 +144,10 @@ for idx in "${!REGION_ARR[@]}"; do
 done
 
 say "Done!"
-echo "Tail logs (example): gcloud compute ssh ${VM_NAME_PREFIX}-${REGION}-1 --zone=${ZONE} -- 'journalctl -u polymarket -f'"
-echo "Check timers (example): gcloud compute ssh ${VM_NAME_PREFIX}-${REGION}-1 --zone=${ZONE} -- 'systemctl list-timers | grep polymarket'"
 echo "Latest in GCS per region:"
 for r in $(echo "$REGIONS" | tr ',' ' '); do
+  echo "Tail logs (example): gcloud compute ssh ${VM_NAME_PREFIX}-${r}-1 --zone=${ZONE} -- 'journalctl -u polymarket -f'"
+  echo "Check timers (example): gcloud compute ssh ${VM_NAME_PREFIX}-${r}-1 --zone=${ZONE} -- 'systemctl list-timers | grep polymarket'"
   b="${BUCKET_PREFIX}-${r}"
   echo "  Region $r -> gs://$b"
   echo "  $(gcloud storage ls -r gs://$b/parquets/event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet 2>/dev/null | tail -n1)"

@@ -5,8 +5,8 @@ set -euo pipefail
 PROJECT="${PROJECT:-polymarket-470619}"
 
 # Regions / zones / replicas (matches your deploy script)
-REGIONS="${REGIONS:-us-central1,us-east1}"          # CSV list of regions
-ZONES="${ZONES:-us-central1-f,us-east1-b}"          # CSV list aligned 1:1 with REGIONS (defaults to "<region>-a" if empty)
+REGIONS="${REGIONS:-europe-west4}"          # CSV list of regions
+ZONES="${ZONES:-europe-west4a}"          # CSV list aligned 1:1 with REGIONS (defaults to "<region>-a" if empty)
 REPLICAS_PER_REGION="${REPLICAS_PER_REGION:-1}"     # N instances per region
 
 # Naming (matches your deploy script)
