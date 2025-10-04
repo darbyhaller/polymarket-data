@@ -6,6 +6,22 @@ from fetch_markets import get_tradeable_asset_mappings
 from parquet_writer import EventTypeParquetWriter
 import hashlib
 import logging
+import socket
+
+is_first_subscription = True
+
+TCP_KEEPIDLE     = 4   # seconds of idle before first KA probe
+TCP_KEEPINTVL    = 5   # seconds between KA probes
+TCP_KEEPCNT      = 6   # number of failed probes before drop
+TCP_USER_TIMEOUT = 18  # milliseconds: max time waiting for unacked data
+
+sockopt = (
+    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+    (socket.IPPROTO_TCP, TCP_KEEPIDLE, 24),      # > 6s ping cadence; 20–30s is fine
+    (socket.IPPROTO_TCP, TCP_KEEPINTVL, 5),      # spacing of probes
+    (socket.IPPROTO_TCP, TCP_KEEPCNT, 3),        # 3 failed probes -> close
+    (socket.IPPROTO_TCP, TCP_USER_TIMEOUT, 15000),  # 15s unacked data -> fail fast
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +35,7 @@ PING_INTERVAL = 6
 PING_TIMEOUT = 3
 
 # If we stop seeing traffic for this long, force-close and reconnect.
-STALL_TIMEOUT = 90
+STALL_TIMEOUT = 30
 
 # Reconnect backoff
 BACKOFF_MIN = 1.0
@@ -98,7 +114,7 @@ def finalizer_loop():
             break
 
 def send_subscription(ws):
-    global subscribed_asset_ids
+    global subscribed_asset_ids, is_first_subscription
     with data_lock:
         current_ids = set(allowed_asset_ids)
         new_ids = list(current_ids - subscribed_asset_ids)
@@ -107,11 +123,12 @@ def send_subscription(ws):
         logging.info("No new ids to subscribe")
         return
 
-    payload = {"assets_ids": new_ids, "type": "market", "initial_dump": True}
+    payload = {"assets_ids": new_ids, "type": "market", "initial_dump": is_first_subscription}
     raw = json.dumps(payload)
     ws.send(raw)
 
     with data_lock:
+        is_first_subscription = False
         subscribed_asset_ids = current_ids
     logging.info("Subscribed %d new ids (total now %d)", len(new_ids), len(current_ids))
 
@@ -119,7 +136,7 @@ def on_open(ws):
     global sent_version, last_message_time, backoff
     last_message_time = time.time()
     backoff = BACKOFF_MIN  # Reset backoff on successful connection
-
+    
     send_subscription(ws)
     with ws_lock:
         sent_version = subs_version
@@ -202,7 +219,8 @@ def on_error(ws, err):
     logging.error("WebSocket error: %r (%s)", err, type(err).__name__, exc_info=True)
 
 def on_close(ws, code, msg):
-    print(f"WebSocket closed: {code} {msg}")
+    c = code if code is not None else 1006
+    logging.error("close code=%s reason=%s since_last=%.1fs", c, msg, time.time() - last_message_time)
     global subscribed_asset_ids
     subscribed_asset_ids.clear()
 
@@ -272,7 +290,7 @@ def run_websocket_with_timeout(ws):
         ws.run_forever(
             ping_interval=PING_INTERVAL,
             ping_timeout=PING_TIMEOUT,
-            ping_payload="ping",
+            sockopt=sockopt,
             skip_utf8_validation=True,
             suppress_origin=False,
         )
@@ -321,7 +339,7 @@ def main():
             
             # Check if connection ran successfully for a reasonable duration
             connection_duration = time.time() - connection_start_time
-            if connection_duration >= 30:  # Reset backoff if connection lasted at least 30 seconds
+            if connection_duration >= 15:  # Reset backoff if connection lasted at least 15 seconds
                 backoff = BACKOFF_MIN
                 print(f"Connection ran successfully for {connection_duration:.1f}s - reset backoff to {BACKOFF_MIN}s")
             
@@ -333,8 +351,7 @@ def main():
             print(f"WebSocket exception: {e}")
 
         # Jittered exponential backoff
-        sleep_for = backoff + random.uniform(0, 0.5 * backoff)
-        sleep_for = min(sleep_for, BACKOFF_MAX)
+        sleep_for = random.uniform(0, backoff)
         print(f"Reconnecting in {sleep_for:.1f}s...")
         if should_stop.wait(sleep_for):
             break
