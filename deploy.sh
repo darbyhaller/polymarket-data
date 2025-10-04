@@ -8,12 +8,12 @@ set -euo pipefail
 # 1 vCPU, 4 GB RAM
 # Per-region buckets will be named: $BUCKET_PREFIX-$region
 
-PROJECT="${PROJECT:-polymarket-470619}"; REGION="${REGION:-us-central1}"; ZONE="${ZONE:-us-central1-a}"
-REGIONS="${REGIONS:-us-central1,us-east1}"
-ZONES="${ZONES:-us-central1-f,us-east1-b}"
+PROJECT="${PROJECT:-polymarket-470619}"
+REGIONS="${REGIONS:-europe-west4}"
+ZONES="${ZONES:-europe-west4-a}"
 REPLICAS_PER_REGION="${REPLICAS_PER_REGION:-1}"
 VM_NAME_PREFIX="${VM_NAME_PREFIX:-polymarket-vm}"
-MACHINE_TYPE="${MACHINE_TYPE:-t2d-standard-1}"
+MACHINE_TYPE="${MACHINE_TYPE:-c4a-standard-1}"
 VM_SCOPES="${VM_SCOPES:-https://www.googleapis.com/auth/cloud-platform}"
 DATA_DISK_PREFIX="${DATA_DISK_PREFIX:-polymarket-data}" DATA_DISK_SIZE_GB="${DATA_DISK_SIZE_GB:-100}"
 BUCKET_PREFIX="${BUCKET_PREFIX:-polymarket-raw-$PROJECT}"
@@ -58,7 +58,7 @@ ensure_sa_and_iam_for_bucket(){
 ensure_disk(){
   local disk_name="$1" zone="$2"
   say "Ensuring disk $disk_name ${DATA_DISK_SIZE_GB}GB in $zone"
-  gcloud compute disks describe "$disk_name" --zone "$zone" >/dev/null 2>&1 || gcloud compute disks create "$disk_name" --size="${DATA_DISK_SIZE_GB}GB" --type=pd-balanced --zone "$zone"
+  gcloud compute disks describe "$disk_name" --zone "$zone" >/dev/null 2>&1 || gcloud compute disks create "$disk_name" --size="${DATA_DISK_SIZE_GB}GB" --type=hyperdisk-balanced --zone "$zone"
 }
 
 ensure_vm(){
