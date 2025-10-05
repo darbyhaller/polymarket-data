@@ -5,24 +5,14 @@ set -euo pipefail
 PROJECT="${PROJECT:-polymarket-470619}"
 
 # Regions / zones / replicas (matches your deploy script)
-REGIONS="${REGIONS:-europe-west4}"          # CSV list of regions
-ZONES="${ZONES:-europe-west4a}"          # CSV list aligned 1:1 with REGIONS (defaults to "<region>-a" if empty)
+REGIONS="${REGIONS:-africa-south1,asia-northeast1,asia-southeast1,australia-southeast1,europe-west4,southamerica-east1,us-central1,us-east1}"
+ZONES="${ZONES:-africa-south1-c,asia-northeast1-c,asia-southeast1-b,australia-southeast1-b,europe-west4-a,southamerica-east1-b,us-central1-f,us-east1-b}"
 REPLICAS_PER_REGION="${REPLICAS_PER_REGION:-1}"     # N instances per region
 
 # Naming (matches your deploy script)
 VM_NAME_PREFIX="${VM_NAME_PREFIX:-polymarket-vm}"
 DATA_DISK_PREFIX="${DATA_DISK_PREFIX:-polymarket-data}"
 BUCKET_PREFIX="${BUCKET_PREFIX:-polymarket-raw-$PROJECT}"
-
-# Legacy single-region names (teardown tries these too, best-effort)
-VM_NAME="${VM_NAME:-polymarket-vm}"
-DATA_DISK_NAME="${DATA_DISK_NAME:-polymarket-data}"
-REGION="${REGION:-us-central1}"
-ZONE="${ZONE:-us-central1-a}"
-BUCKET="${BUCKET:-polymarket-raw-$PROJECT}"
-
-SA_NAME="${SA_NAME:-vm-polymarket}"
-SA_EMAIL="$SA_NAME@$PROJECT.iam.gserviceaccount.com"
 
 say(){ echo -e "\n==> $*"; }
 gcloud config set project "$PROJECT" >/dev/null
@@ -71,31 +61,6 @@ for idx in "${!REGION_ARR[@]}"; do
 
   say "Deleting bucket: gs://$bucket"
   gcloud storage buckets delete "gs://$bucket" --quiet || echo "Bucket $bucket not found (ok)."
-
-  # Remove IAM binding from bucket if it somehow still exists
-  say "Removing SA IAM binding on bucket (best-effort)"
-  gcloud storage buckets remove-iam-policy-binding "gs://$bucket" --member="serviceAccount:$SA_EMAIL" --role="roles/storage.objectAdmin" 2>/dev/null || true
 done
-
-# ----- Legacy single-region cleanup (best-effort) -----
-say "Legacy cleanup (single-region names)"
-say "Deleting legacy VM: $VM_NAME"
-gcloud compute instances delete "$VM_NAME" --zone="$ZONE" --quiet || echo "Legacy VM not found (ok)."
-
-say "Deleting legacy data disk: $DATA_DISK_NAME"
-gcloud compute disks delete "$DATA_DISK_NAME" --zone="$ZONE" --quiet || echo "Legacy disk not found (ok)."
-
-say "Deleting ALL objects in legacy bucket gs://$BUCKET"
-gcloud storage rm -r "gs://$BUCKET/**" || echo "Legacy bucket empty or not found (ok)."
-
-say "Deleting legacy bucket: gs://$BUCKET"
-gcloud storage buckets delete "gs://$BUCKET" --quiet || echo "Legacy bucket not found (ok)."
-
-say "Removing SA IAM binding on legacy bucket (best-effort)"
-gcloud storage buckets remove-iam-policy-binding "gs://$BUCKET" --member="serviceAccount:$SA_EMAIL" --role="roles/storage.objectAdmin" 2>/dev/null || true
-
-# ----- Service account cleanup -----
-say "Deleting service account: $SA_EMAIL"
-gcloud iam service-accounts delete "$SA_EMAIL" --quiet || echo "Service account not found (ok)."
 
 say "Teardown complete."

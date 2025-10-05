@@ -10,16 +10,20 @@ set -euo pipefail
 # MUST CHANGE IMAGE_FAMILY to be compatible with MACHINE_TYPE (remove/add -arm-64 from end)
 # IMAGE_FAMILY="ubuntu-2204-lts"
 
-
 PROJECT="${PROJECT:-polymarket-470619}"
-REGIONS="${REGIONS:-europe-west4}"
-ZONES="${ZONES:-europe-west4-a}"
+REGIONS="${REGIONS:-africa-south1}"
+# REGIONS="${REGIONS:-africa-south1,asia-northeast1,asia-southeast1,australia-southeast1,europe-west4,southamerica-east1,us-central1,us-east1,me-central1}"
+ZONES="${ZONES:-africa-south1-c}"
+# ZONES="${ZONES:-africa-south1-c,asia-northeast1-c,asia-southeast1-b,australia-southeast1-b,europe-west4-a,southamerica-east1-b,us-central1-f,us-east1-b,me-central1-a}"
 REPLICAS_PER_REGION="${REPLICAS_PER_REGION:-1}"
 VM_NAME_PREFIX="${VM_NAME_PREFIX:-polymarket-vm}"
-MACHINE_TYPE="${MACHINE_TYPE:-c4a-standard-1}"
-IMAGE_FAMILY="ubuntu-2204-lts-arm64"
+MACHINE_TYPE="${MACHINE_TYPE:-e2-small}"
+# MACHINE_TYPE="${MACHINE_TYPE:-c4a-standard-1}"
+IMAGE_FAMILY="ubuntu-2204-lts"
+# IMAGE_FAMILY="ubuntu-2204-lts-arm64"
+DISK_TYPE="pd-balanced"
 VM_SCOPES="${VM_SCOPES:-https://www.googleapis.com/auth/cloud-platform}"
-DATA_DISK_PREFIX="${DATA_DISK_PREFIX:-polymarket-data}" DATA_DISK_SIZE_GB="${DATA_DISK_SIZE_GB:-100}"
+DATA_DISK_PREFIX="${DATA_DISK_PREFIX:-polymarket-data}" DATA_DISK_SIZE_GB="${DATA_DISK_SIZE_GB:-30}"
 BUCKET_PREFIX="${BUCKET_PREFIX:-polymarket-raw-$PROJECT}"
 ARCHIVE_AFTER_DAYS="${ARCHIVE_AFTER_DAYS:-365}"
 REPO_URL="${REPO_URL:-https://github.com/darbyhaller/polymarket-data}" REPO_BRANCH="${REPO_BRANCH:-main}"
@@ -30,6 +34,9 @@ SA_EMAIL="$SA_NAME@$PROJECT.iam.gserviceaccount.com" LOCAL_RETENTION_DAYS="${LOC
 say(){ echo -e "\n==> $*"; }
 need(){ command -v "$1" >/dev/null || { echo "Missing: $1"; exit 1; }; }
 ensure_project(){ gcloud config set project "$PROJECT" >/dev/null; }
+ensure_apis(){
+  gcloud services enable monitoring.googleapis.com logging.googleapis.com opsconfigmonitoring.googleapis.com storage.googleapis.com compute.googleapis.com
+}
 
 ensure_sa_project_roles(){
   say "Ensuring SA $SA_EMAIL exists and has Monitoring/Logging writer roles on project $PROJECT"
@@ -62,7 +69,7 @@ ensure_sa_and_iam_for_bucket(){
 ensure_disk(){
   local disk_name="$1" zone="$2"
   say "Ensuring disk $disk_name ${DATA_DISK_SIZE_GB}GB in $zone"
-  gcloud compute disks describe "$disk_name" --zone "$zone" >/dev/null 2>&1 || gcloud compute disks create "$disk_name" --size="${DATA_DISK_SIZE_GB}GB" --type=hyperdisk-balanced --zone "$zone"
+  gcloud compute disks describe "$disk_name" --zone "$zone" >/dev/null 2>&1 || gcloud compute disks create "$disk_name" --size="${DATA_DISK_SIZE_GB}GB" --type=${DISK_TYPE} --zone "$zone"
 }
 
 ensure_vm(){
@@ -112,6 +119,8 @@ ensure_vm(){
 }
 
 need gcloud; ensure_project
+ensure_apis
+ensure_sa_project_roles
 
 # --- Fan out over regions and replicas ---
 mapfile -t REGION_ARR < <(split_csv "$REGIONS")
@@ -146,8 +155,8 @@ done
 say "Done!"
 echo "Latest in GCS per region:"
 for r in $(echo "$REGIONS" | tr ',' ' '); do
-  echo "Tail logs (example): gcloud compute ssh ${VM_NAME_PREFIX}-${r}-1 --zone=${ZONE} -- 'journalctl -u polymarket -f'"
-  echo "Check timers (example): gcloud compute ssh ${VM_NAME_PREFIX}-${r}-1 --zone=${ZONE} -- 'systemctl list-timers | grep polymarket'"
+  echo "Tail logs (example): gcloud compute ssh ${VM_NAME_PREFIX}-${r}-1 -- 'journalctl -u polymarket -f'"
+  echo "Check timers (example): gcloud compute ssh ${VM_NAME_PREFIX}-${r}-1 -- 'systemctl list-timers | grep polymarket'"
   b="${BUCKET_PREFIX}-${r}"
   echo "  Region $r -> gs://$b"
   echo "  $(gcloud storage ls -r gs://$b/parquets/event_type=*/year=*/month=*/day=*/hour=*/events-*.parquet 2>/dev/null | tail -n1)"
