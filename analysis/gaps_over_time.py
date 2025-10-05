@@ -10,7 +10,7 @@ from plotly.colors import qualitative as pq
 # ========= Config (tweak these) =========
 # Map legend label -> base path
 roots = [
-    "us-central1", "us-east1", "europe-west4", "africa-south1", "asia-northeast1", "asia-southeast1" "australia-southeast1", "me-west1", "southamerica-east1"
+    "us-central1", "us-east1", "europe-west4", "africa-south1", "asia-northeast1", "asia-southeast1", "australia-southeast1", "me-west1", "southamerica-east1"
 ]
 ROOTS = {root: "all-parquets/" + root + "-parquets/parquets" for root in roots}
 
@@ -21,8 +21,8 @@ HOUR_FILTER  = "*"   # "*" for all
 TIMESTAMP_COL  = "timestamp"         # ms since epoch
 DELAY_COL      = "delay"             # ms; recv_ms - server timestamp
 USE_RIGHT_EDGE = True
-RESAMPLE       = "1s"
-PCTL           = 0.9999
+RESAMPLE       = "1M"
+PCTL           = 0.999999
 HTML_OUT       = "per_minute_pctl_gap_multi.html"
 OPEN_BROWSER   = True
 pio.renderers.default = "browser" if OPEN_BROWSER else "notebook_connected"
